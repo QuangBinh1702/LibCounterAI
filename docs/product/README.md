@@ -1,20 +1,18 @@
 # Product Docs
 
-This directory is intentionally generic and mostly empty in Harness v0.
+This directory contains the living LibCounterAI product contract derived from
+`SPEC.md` and the implemented story packets.
 
-When a user provides a project spec, derive smaller product contract files here
-instead of keeping one large spec as the living plan. Name files by the product
-domains that actually exist in that spec, for example `overview.md`,
-`billing.md`, `workflows.md`, `permissions.md`, or `api-conventions.md`.
-
-Do not create domain files before the spec just to fill the folder. Empty
-structure is healthier than fake product truth.
+Use these files for current behavior. Treat `SPEC.md` as historical input
+material unless a new intake explicitly asks to revisit it.
 
 ## Current Product Contracts
 
-- `symphony-web-ui-controller.md` - Local Web UI controller for Harness Symphony
-  task execution, review, dependency blocking, Codex event logs, PR review, and
-  sync.
+- `overview.md` - LibCounterAI goals, known/unknown visitor model, visit
+  sessions, and counting rules.
+- `data-model.md` - PostgreSQL/pgvector/Redis storage model.
+- `ai-pipeline.md` - Server-side video, detection, tracking, line crossing,
+  face embedding, matching, and unknown re-identification flow.
 
 ## Update Rule
 

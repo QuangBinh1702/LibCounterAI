@@ -2,7 +2,7 @@ import os
 import sys
 import cv2
 import json
-import urllib.request
+from validation_assets import ensure_test_face
 
 # Setup paths
 CWD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,14 +17,12 @@ TEST_IMAGE = os.path.join(CWD, "lena_matching.jpg")
 
 print("Starting face matching and identification validation tests...")
 
-# 1. Download test face image if not present
-if not os.path.exists(TEST_IMAGE):
-    print("Downloading test face image...")
-    try:
-        urllib.request.urlretrieve('https://raw.githubusercontent.com/opencv/opencv/master/samples/data/lena.jpg', TEST_IMAGE)
-    except Exception as e:
-        print(f"Failed to download test face image: {e}")
-        sys.exit(1)
+# 1. Copy test face image if not present
+try:
+    created_test_image = ensure_test_face(TEST_IMAGE)
+except Exception as e:
+    print(f"Failed to prepare test face image: {e}")
+    sys.exit(1)
 
 # 2. Define helper for test cleanup
 def cleanup_database(member_code):
@@ -174,7 +172,7 @@ except Exception as e:
     tests_passed = False
 
 # 4. Clean up files and DB
-if os.path.exists(TEST_IMAGE):
+if created_test_image and os.path.exists(TEST_IMAGE):
     os.remove(TEST_IMAGE)
 
 cleanup_database("SV777777")

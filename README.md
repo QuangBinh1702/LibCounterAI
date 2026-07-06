@@ -223,28 +223,39 @@ full model, the degrade ladder, and how to wire a tool into a flow step.
 
 ## Current State
 
-This repository is in Harness v0.
+This repository now hosts the LibCounterAI demo application on top of Harness.
+The reusable harness is still present, but the project is no longer an empty
+Harness v0 install.
 
-There is no application implementation and no baked-in product specification
-yet. The current work is the reusable project harness: the file structure,
-agent operating model, feature intake process, story templates, and validation
-expectations that help humans and agents turn a future user-provided spec into
-implementation work.
+Current product scope:
+
+- FastAPI backend under `app/`.
+- React/Vite browser dashboard under `surfaces/browser/`.
+- PostgreSQL/pgvector and Redis local services through `docker-compose.yml`.
+- Product contracts under `docs/product/`.
+- Implemented story packets under `docs/stories/epics/`.
+- Durable story proof state in `harness.db`, queried with
+  `scripts/bin/harness-cli.exe query matrix` on Windows.
+
+As of 2026-07-06, the durable Harness matrix contains 14 implemented stories
+covering project setup, person detection/tracking, database schema, line
+crossing, web UI, face pipeline, enrollment, face matching, RTSP camera checks,
+unknown re-identification, visit sessions, session API/UI sync, CSV export, and
+known/unknown analytics. `scripts/bin/harness-cli.exe story verify-all` passes
+for all 14 stories on Windows when run from the repository root.
 
 ## Product Sources
 
-No product contract is currently defined.
-
-When a user provides a project specification, add or reference it as the input
-spec for the first buildout, then derive smaller living artifacts from it:
+`SPEC.md` is the original input specification. The living product contract is
+split into smaller files:
 
 - `docs/product/`: current product contract files, created from the spec.
 - `docs/stories/`: story packets and backlog created from selected work.
 - `docs/TEST_MATRIX.md`: behavior-to-proof control panel.
 - `docs/decisions/`: durable decisions and tradeoffs.
 
-Do not keep a project-specific spec or product breakdown in this harness until
-a real project supplies one.
+Do not extend `SPEC.md` as the day-to-day plan. Ongoing work should update the
+smaller product docs, story packets, durable proof matrix, and decision records.
 
 ## Repository Structure
 

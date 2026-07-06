@@ -62,7 +62,7 @@ Tích hợp chức năng so khớp khuôn mặt thời gian thực vào luồng 
   ```text
   Running: python scripts/validate_matching.py
   Starting face matching and identification validation tests...
-  Downloading test face image...
+  Copied face test fixture to D:\taggo\LibCounterAI\lena_matching.jpg
   YOLOv8 ONNX Detector loaded successfully.
   FacePipeline ONNX Models loaded successfully.
 
@@ -98,3 +98,7 @@ Tích hợp chức năng so khớp khuôn mặt thời gian thực vào luồng 
   Cleaning up database records for member_code: SV777777
   Story US-008 verification: pass
   ```
+
+- 2026-07-06: `scripts/validate_matching.py` now uses
+  `tests/fixtures/lena.jpg` through `scripts/validation_assets.py`, so the
+  verification no longer requires internet access at runtime.

@@ -24,7 +24,7 @@ Tích hợp mô hình ONNX phát hiện khuôn mặt (YuNet) và trích xuất v
 - [x] Hỗ trợ phát hiện khuôn mặt và định vị 5 điểm mốc (landmarks - mắt, mũi, miệng).
 - [x] Thực hiện căn chỉnh khuôn mặt (alignment) và trích xuất vector đặc trưng 128 chiều (SFace embedding).
 - [x] Cập nhật định nghĩa CSDL trong `app/models.py` và `scripts/validate_database.py` thành `VectorType(128)` tương thích với SFace.
-- [x] Viết script kiểm định `scripts/validate_face_pipeline.py` tải hình ảnh mẫu Lena từ OpenCV và chạy trích xuất embedding thành công.
+- [x] Viết script kiểm định `scripts/validate_face_pipeline.py` dùng fixture ảnh mẫu cục bộ và chạy trích xuất embedding thành công.
 
 ## Design Notes
 
@@ -54,7 +54,7 @@ Tích hợp mô hình ONNX phát hiện khuôn mặt (YuNet) và trích xuất v
   Running: python scripts/validate_face_pipeline.py
   Starting face pipeline validation tests...
   FacePipeline initialized successfully (models loaded).
-  lena.jpg missing, downloading test face image...
+  Copied face test fixture to D:\taggo\LibCounterAI\lena.jpg
   Loaded test image: shape=(512, 512, 3)
   Detected 1 face(s).
   Face bbox: [207, 182, 145, 206]
@@ -66,3 +66,7 @@ Tích hợp mô hình ONNX phát hiện khuôn mặt (YuNet) và trích xuất v
   Test face image lena.jpg cleaned up successfully.
   Story US-006 verification: pass
   ```
+
+- 2026-07-06: `scripts/validate_face_pipeline.py` now uses
+  `tests/fixtures/lena.jpg` through `scripts/validation_assets.py`, so the
+  verification no longer requires internet access at runtime.

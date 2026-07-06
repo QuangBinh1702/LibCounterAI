@@ -1,6 +1,7 @@
 import os
 import sys
 import cv2
+from validation_assets import ensure_test_face
 
 # Setup paths
 CWD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,15 +21,12 @@ except Exception as e:
     print(f"Error initializing FacePipeline: {e}")
     sys.exit(1)
 
-# 2. Check if test image exists, download if missing
-if not os.path.exists(TEST_IMAGE):
-    import urllib.request
-    print("lena.jpg missing, downloading test face image...")
-    try:
-        urllib.request.urlretrieve('https://raw.githubusercontent.com/opencv/opencv/master/samples/data/lena.jpg', TEST_IMAGE)
-    except Exception as e:
-        print(f"Failed to download test image: {e}")
-        sys.exit(1)
+# 2. Check if test image exists, copy fixture if missing
+try:
+    created_test_image = ensure_test_face(TEST_IMAGE)
+except Exception as e:
+    print(f"Failed to prepare test image: {e}")
+    sys.exit(1)
 
 # 3. Read image
 img = cv2.imread(TEST_IMAGE)
@@ -77,7 +75,7 @@ print("All FacePipeline validation tests PASSED successfully!")
 
 # 7. Clean up test image
 try:
-    if os.path.exists(TEST_IMAGE):
+    if created_test_image and os.path.exists(TEST_IMAGE):
         os.remove(TEST_IMAGE)
         print("Test face image lena.jpg cleaned up successfully.")
 except Exception as e:

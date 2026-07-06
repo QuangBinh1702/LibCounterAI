@@ -1,10 +1,23 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LibCounterAI - Live Dashboard</title>
+    <meta
+      name="description"
+      content="LibCounterAI - Bảng điều khiển giám sát ra/vào thư viện theo thời gian thực với nhận diện khuôn mặt và đếm lượt người."
+    />
+    <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)" />
+    <title>LibCounterAI - Bảng điều khiển</title>
+    <script>
+      (function () {
+        var stored = localStorage.getItem('libcounterai-theme');
+        var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme = stored === 'light' || stored === 'dark' ? stored : prefersDark ? 'dark' : 'light';
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
