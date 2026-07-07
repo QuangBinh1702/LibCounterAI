@@ -39,6 +39,7 @@ it synchronized when story proof changes.
 | US-012 | Unknown session API and UI sync | no | yes | no | yes | implemented | Story packet proof; Harness matrix |
 | US-013 | CSV export and date-filtered sessions | no | yes | no | yes | implemented | Story packet proof; Harness matrix |
 | US-014 | Enhanced analytics with known-unknown breakdown | no | yes | no | yes | implemented | Story packet proof; Harness matrix |
+| US-015 | E2E dashboard smoke and demo runbook | no | yes | yes | yes | implemented | `npm --prefix surfaces/browser run test:e2e` passed on 2026-07-06 |
 
 ## Evidence Rules
 
@@ -54,5 +55,5 @@ it synchronized when story proof changes.
 ## Current Gaps
 
 - Most implemented stories still lack unit-level proof.
-- Browser E2E proof is not yet recorded for the dashboard workflow.
-- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 14 stories on 2026-07-06 after validation scripts were made self-contained.
+- US-015 records browser E2E smoke proof for the dashboard workflow.
+- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 15 stories on 2026-07-06.

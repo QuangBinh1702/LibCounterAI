@@ -4,16 +4,18 @@ import { motion, useReducedMotion } from 'framer-motion';
 interface PageTransitionProps {
   children: ReactNode;
   className?: string;
+  testId?: string;
 }
 
 const PAGE_EASE = [0.22, 1, 0.36, 1] as const;
 
-export function PageTransition({ children, className }: PageTransitionProps) {
+export function PageTransition({ children, className, testId }: PageTransitionProps) {
   const reduceMotion = useReducedMotion();
 
   return (
     <motion.main
       id="main-content"
+      data-testid={testId}
       className={className}
       initial={reduceMotion ? false : { opacity: 0 }}
       animate={{ opacity: 1 }}

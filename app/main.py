@@ -34,6 +34,18 @@ detector = None
 face_pipeline = None
 session_trackers = {}
 
+
+def utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def elapsed_seconds(start: datetime.datetime, end: datetime.datetime) -> int:
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=datetime.timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=datetime.timezone.utc)
+    return int((end - start).total_seconds())
+
 @app.on_event("startup")
 def load_models():
     global detector, face_pipeline
@@ -300,7 +312,7 @@ async def process_frame(
                 track_id=track_id,
                 camera_id=camera.id,
                 confidence=float(confidence),
-                timestamp=datetime.datetime.utcnow()
+                timestamp=utc_now()
             )
             db.add(db_event)
             db.flush()
@@ -318,7 +330,7 @@ async def process_frame(
                             person_id=person_id,
                             entry_camera_id=camera.id,
                             entry_event_id=db_event.id,
-                            entry_at=datetime.datetime.utcnow(),
+                            entry_at=utc_now(),
                             status="ACTIVE"
                         )
                         db.add(new_sess)
@@ -331,10 +343,9 @@ async def process_frame(
                     if active_sess:
                         active_sess.exit_camera_id = camera.id
                         active_sess.exit_event_id = db_event.id
-                        active_sess.exit_at = datetime.datetime.utcnow()
+                        active_sess.exit_at = utc_now()
                         active_sess.status = "CLOSED"
-                        delta = (active_sess.exit_at - active_sess.entry_at).total_seconds()
-                        active_sess.duration_seconds = int(delta)
+                        active_sess.duration_seconds = elapsed_seconds(active_sess.entry_at, active_sess.exit_at)
             elif identity_type == "UNKNOWN" and unknown_id is not None:
                 if direction == "ENTRY":
                     # Check if active session exists for this unknown visitor
@@ -348,7 +359,7 @@ async def process_frame(
                             unknown_id=unknown_id,
                             entry_camera_id=camera.id,
                             entry_event_id=db_event.id,
-                            entry_at=datetime.datetime.utcnow(),
+                            entry_at=utc_now(),
                             status="ACTIVE"
                         )
                         db.add(new_sess)
@@ -361,10 +372,9 @@ async def process_frame(
                     if active_sess:
                         active_sess.exit_camera_id = camera.id
                         active_sess.exit_event_id = db_event.id
-                        active_sess.exit_at = datetime.datetime.utcnow()
+                        active_sess.exit_at = utc_now()
                         active_sess.status = "CLOSED"
-                        delta = (active_sess.exit_at - active_sess.entry_at).total_seconds()
-                        active_sess.duration_seconds = int(delta)
+                        active_sess.duration_seconds = elapsed_seconds(active_sess.entry_at, active_sess.exit_at)
             
             db.commit()
             print(f"[DB Log] Event logged: {direction} for track {track_id} ({identity_type})")

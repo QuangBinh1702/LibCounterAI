@@ -237,12 +237,12 @@ Current product scope:
 - Durable story proof state in `harness.db`, queried with
   `scripts/bin/harness-cli.exe query matrix` on Windows.
 
-As of 2026-07-06, the durable Harness matrix contains 14 implemented stories
+As of 2026-07-06, the durable Harness matrix contains 15 implemented stories
 covering project setup, person detection/tracking, database schema, line
 crossing, web UI, face pipeline, enrollment, face matching, RTSP camera checks,
 unknown re-identification, visit sessions, session API/UI sync, CSV export, and
-known/unknown analytics. `scripts/bin/harness-cli.exe story verify-all` passes
-for all 14 stories on Windows when run from the repository root.
+known/unknown analytics, plus browser dashboard E2E smoke proof. `scripts/bin/harness-cli.exe story verify-all` passes
+for all 15 stories on Windows when run from the repository root.
 
 ## Product Sources
 

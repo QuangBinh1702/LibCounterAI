@@ -31,7 +31,7 @@ cleanup()
 
 # 2. Seed test data directly
 db = SessionLocal()
-now = datetime.datetime.utcnow()
+now = datetime.datetime.utcnow().replace(hour=12, minute=0, second=0, microsecond=0)
 
 # Create a camera
 cam = models.Camera(name="Test Cam", source_type="WEBCAM", source_url="0", status="ONLINE")

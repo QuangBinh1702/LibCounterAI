@@ -38,14 +38,13 @@ class VectorType(TypeDecorator):
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            if dialect.name == "postgresql":
-                # pgvector returns list of floats or numpy array
+            if dialect.name == "postgresql" and not isinstance(value, str):
+                # pgvector may return a native list/array when the driver is registered.
                 return value
-            else:
-                try:
-                    return json.loads(value)
-                except Exception:
-                    return [float(x) for x in value.split(",") if x]
+            try:
+                return json.loads(value)
+            except Exception:
+                return [float(x) for x in value.strip("[]").split(",") if x]
         return value
 
 

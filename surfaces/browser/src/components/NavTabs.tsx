@@ -44,6 +44,7 @@ export function NavTabs({ tabs, activeTab, onChange, iconProps = { size: 14, wei
             key={tab.id}
             type="button"
             aria-current={isActive ? 'page' : undefined}
+            data-testid={`nav-${tab.id}`}
             className={`tab-btn ${isActive ? 'active' : ''} ${isCompactNav ? 'tab-btn--compact' : ''}`}
             onClick={() => onChange(tab.id)}
           >

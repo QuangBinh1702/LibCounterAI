@@ -1,124 +1,155 @@
 # Architecture
 
-No application stack is selected yet.
+LibCounterAI is a FastAPI and React/Vite application for library visitor
+counting, known-person enrollment, face matching, unknown visitor
+re-identification, visit sessions, and dashboard reporting.
 
-No application code exists yet. This document defines generic architecture
-questions and boundary rules that future implementation should adapt after a
-user-provided spec and stack decision exist.
+The reusable Harness remains in this repository, but the app is no longer an
+empty Harness install. This document is the current architecture map for agent
+work before changing code.
 
-## Discovery Before Shape
+## Runtime Surfaces
 
-Before proposing implementation shape, identify:
+| Surface | Path | Responsibility |
+| --- | --- | --- |
+| Backend API | `app/main.py` | FastAPI routes for health, frame processing, person enrollment, cameras, events, sessions, and analytics. |
+| Persistence | `app/database.py`, `app/models.py`, `app/alembic/` | SQLAlchemy models, PostgreSQL/pgvector or SQLite development fallback, and Alembic migrations. |
+| AI pipeline | `app/detector.py`, `app/tracker.py`, `app/face_pipeline.py` | YOLOv8 ONNX person detection, IoU tracking, line crossing, OpenCV YuNet face detection, and SFace embeddings. |
+| Browser dashboard | `surfaces/browser/` | React/Vite dashboard for monitor, registry, visit history, CSV export, analytics, theme, and E2E smoke checks. |
+| Local services | `docker-compose.yml` | PostgreSQL with pgvector and Redis for local product-aligned runtime. |
+| Harness operations | `scripts/bin/harness-cli.exe`, `docs/stories/`, `harness.db` | Durable story status, verification commands, intake, traces, backlog, and decisions. |
 
-- Product surfaces: browser, mobile, desktop, CLI, API, worker, or service.
-- Runtime stack: language, framework, database, queues, providers, and hosting.
-- Core domains: the product concepts that deserve stable names and contracts.
-- Boundary inputs: user input, API requests, webhooks, jobs, files, credentials,
-  provider payloads, and environment configuration.
-- Validation ladder: the smallest checks that can prove the selected stack.
+## Stack Decisions
 
-Record stack choices in `docs/decisions/` when they meaningfully constrain
-future work.
+- Backend: Python FastAPI, SQLAlchemy, OpenCV, ONNX Runtime, pgvector.
+- Frontend: React, TypeScript, Vite, Framer Motion, Phosphor Icons.
+- Database: PostgreSQL with pgvector is the product-aligned target. SQLite is a
+  development and validation fallback for scripts that do not require pgvector
+  indexes.
+- Cache/state substrate: Redis is part of the local service contract, but the
+  current backend health endpoint only reports Redis configuration and does not
+  actively use Redis for session state yet.
+- AI models: ONNX model files live under `app/` and are runtime assets. Do not
+  ignore or remove them unless a replacement startup download path is verified.
 
-## Default Layering
+Durable stack decisions are recorded in:
+
+- `docs/decisions/0008-frontend-stack.md`
+- `docs/decisions/0009-backend-and-ai-stack.md`
+- `docs/decisions/0010-database-migration.md`
+
+## Current Data Flow
 
 ```text
-domain
-  <- application
-      <- infrastructure
-          <- interface
-              <- app surfaces
+Browser dashboard
+  -> FastAPI REST endpoints
+      -> image/frame upload or JSON request parsing
+      -> YOLOv8 detector / mock detections
+      -> IoU tracker and line-crossing detection
+      -> face detection and SFace embedding extraction
+      -> known template cosine matching
+      -> unknown identity re-identification
+      -> SQLAlchemy persistence
+      -> dashboard responses for events, sessions, occupancy, hourly stats
 ```
 
-## Candidate Structure
+The browser E2E smoke test in `surfaces/browser/tests/e2e/` mocks backend API
+responses. It proves dashboard rendering, navigation, CSV export, and analytics
+display, but it is not a real backend or camera integration test.
 
-```text
-app/
-  domain/
-    entities/
-    value-objects/
-    repositories/
-    services/
+## Persistence Model
 
-  application/
-    commands/
-    queries/
-    handlers/
+Primary product tables are represented by SQLAlchemy models in `app/models.py`:
 
-  infrastructure/
-    database/
-    logging/
-    notifications/
+- `users`
+- `persons`
+- `face_templates`
+- `unknown_identities`
+- `cameras`
+- `camera_configs`
+- `events`
+- `visit_sessions`
 
-  interface/
-    controllers/
-    dto/
-    presenters/
-    routes/
-    middlewares/
+`face_templates.embedding_vector` and `unknown_identities.embedding_vector` use
+a custom `VectorType(128)` that maps to pgvector on PostgreSQL and JSON text on
+SQLite. The product docs mention older 512-dimensional ArcFace assumptions in
+places; current runtime code uses SFace 128-dimensional embeddings.
 
-surfaces/
-  browser/
-  mobile/
-  desktop/
-  cli/
-```
+## Boundary Rules
 
-This is a thinking template, not a scaffold. Create real folders only when a
-story enters implementation and the selected stack needs them.
+Unknown input must be parsed at the API boundary before entering tracking,
+matching, or persistence code. Current boundary inputs include:
+
+- Uploaded image files in `/api/process-frame` and `/api/persons/register`.
+- Form fields such as `session_id`, `line_config`, and `mock_detections`.
+- Camera source URLs for webcam, file, and RTSP sources.
+- Query parameters such as `/api/sessions?date=YYYY-MM-DD`.
+- Environment variables in `app/database.py` and service configuration.
+- Database rows converted into API responses.
+
+Current gaps before production use:
+
+- Authentication and authorization are not implemented for API routes.
+- CORS is currently permissive and should be narrowed before deployment.
+- File upload size, image dimensions, and RTSP connection timeouts need explicit
+  limits.
+- Health checks report configuration presence rather than actively pinging
+  PostgreSQL and Redis.
 
 ## Dependency Rule
 
-Inner layers must not depend on outer layers.
+The implemented code is currently pragmatic and route-centric rather than fully
+layered. Preserve these boundaries for future changes:
 
-| Layer | May depend on | Must not depend on |
+| Layer | Current files | Rule |
 | --- | --- | --- |
-| domain | nothing project-external except tiny pure utilities | framework, database, UI, provider, process/env |
-| application | domain | framework, UI, provider, database concrete clients |
-| infrastructure | domain, application | interface controllers or UI |
-| interface | all backend layers | UI state or platform shell assumptions |
-| app surfaces | API contracts and app-facing clients | domain internals directly |
+| Domain logic | `app/geometry.py`, `app/tracker.py` | Keep pure line-crossing and tracking rules independent from FastAPI, database, and UI code. |
+| AI infrastructure | `app/detector.py`, `app/face_pipeline.py` | Own model loading and inference details; callers should pass images and receive structured detections or embeddings. |
+| Persistence | `app/database.py`, `app/models.py`, `app/alembic/` | Own connection setup, models, vector compatibility, and migrations. |
+| Interface/API | `app/main.py` | Parse requests, call pipeline/persistence code, and format API responses. Avoid growing more domain rules here when adding larger features. |
+| Browser surface | `surfaces/browser/src/` | Consume public API contracts only; do not depend on backend internals. |
 
-## Parse-First Boundary Rule
+When a feature grows beyond a narrow route change, prefer extracting application
+services from `app/main.py` instead of adding more stateful logic directly to
+route handlers.
 
-Unknown data must be parsed at boundaries before it enters inner code.
+## Performance Notes
 
-Boundaries include:
+Known hot paths:
 
-- HTTP request bodies, params, and query strings.
-- Session payloads and identity claims.
-- Environment variables.
-- Database rows returned from external clients.
-- Platform shell payloads.
-- Deep links, tokens, and signed URLs.
-- Provider webhooks, events, and async payloads.
+- `/api/process-frame` loads all active face templates for every frame and
+  computes cosine similarity in Python.
+- Unknown re-identification loads all active unknown identities and compares
+  vectors in Python.
+- Face detection and embedding extraction run synchronously inside the FastAPI
+  request path.
+- `session_trackers` is an in-memory dictionary keyed by client-provided
+  `session_id`, so memory can grow without eviction.
+- Event/session/analytics list endpoints currently return all matching rows
+  without pagination.
 
-Target flow:
+The PostgreSQL target includes pgvector and HNSW indexes. Future performance
+work should move vector similarity lookup into PostgreSQL or a bounded cache,
+add pagination, and introduce tracker/session eviction.
 
-```text
-unknown input
-  -> parser
-  -> typed DTO or command
-  -> application use case
-  -> domain object/value object
-```
+## Security Notes
 
-Inner layers should work with meaningful product types such as `UserId`,
-`AccountId`, `WorkspaceId`, `Role`, `DateRange`, or domain-specific IDs,
-rather than repeatedly validating raw strings.
+The current application is demo-oriented. Before production or shared network
+deployment, treat these as required stories:
 
-## Command/Query Boundary
-
-If the product has both reads and writes, keep command/query separation clear at
-the code level even when the storage layer is simple:
-
-- Commands mutate state and own audit side effects.
-- Queries read state and format for consumers.
-- Shared domain rules live in domain/application, not controllers.
+- Add authentication and role-based authorization for staff/admin workflows.
+- Restrict CORS to configured dashboard origins.
+- Validate upload content type, file size, image dimensions, and camera source
+  URLs.
+- Add request timeouts for camera/RTSP probing.
+- Define biometric retention for known templates and unknown identities.
+- Avoid returning internal exception strings in API responses.
+- Replace `print` logging with structured logs that do not expose sensitive
+  paths, URLs, or biometric pipeline details.
 
 ## Observability Contract
 
-The future server should emit one canonical JSON log line per request with:
+The server should eventually emit one canonical JSON log line per request with:
 
 - timestamp
 - level

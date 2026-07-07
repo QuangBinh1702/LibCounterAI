@@ -717,7 +717,7 @@ function App() {
 
         <div className="system-status">
           <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          <div className="status-indicator">
+          <div className="status-indicator" data-testid="backend-status">
             <Plugs {...ICON_SM} />
             Máy chủ
             <span className={`dot ${isBackendOnline ? '' : 'offline'}`} />
@@ -728,7 +728,7 @@ function App() {
 
       <AnimatePresence mode="sync" initial={false}>
       {activeTab === 'monitor' && (
-        <PageTransition key="monitor" className="dashboard-grid page-view">
+        <PageTransition key="monitor" className="dashboard-grid page-view" testId="view-monitor">
           <section className="panel">
             <h2 className="panel-title">
               <GearSix {...ICON} />
@@ -882,7 +882,7 @@ function App() {
               Khung hình trực tiếp
             </h2>
 
-            <div className={screenClass}>
+            <div className={screenClass} data-testid="video-screen">
               <span className="screen-hud screen-hud--tl" aria-hidden="true" />
               <span className="screen-hud screen-hud--tr" aria-hidden="true" />
               <span className="screen-hud screen-hud--bl" aria-hidden="true" />
@@ -986,7 +986,7 @@ function App() {
       )}
 
       {activeTab === 'registry' && (
-        <PageTransition key="registry" className="page-stack page-view">
+        <PageTransition key="registry" className="page-stack page-view" testId="view-registry">
           <section className="panel">
             <h2 className="panel-title">
               <UserPlus {...ICON} />
@@ -1044,7 +1044,7 @@ function App() {
               <SkeletonRows rows={6} />
             ) : (
             <div className="table-wrapper">
-              <table className="data-table">
+              <table className="data-table" data-testid="persons-table">
                 <thead>
                   <tr>
                     <th>ID</th>
@@ -1094,7 +1094,7 @@ function App() {
       )}
 
       {activeTab === 'history' && (
-        <PageTransition key="history" className="page-stack page-view">
+        <PageTransition key="history" className="page-stack page-view" testId="view-history">
           <section className="panel panel-grow">
             <div className="section-toolbar">
               <h2 className="panel-title">
@@ -1112,7 +1112,7 @@ function App() {
                   <ArrowsClockwise {...ICON_SM} />
                   Lọc
                 </button>
-                <button type="button" className="btn btn-sm" onClick={exportToCSV}>
+                <button type="button" className="btn btn-sm" data-testid="export-csv" onClick={exportToCSV}>
                   <DownloadSimple {...ICON_SM} />
                   Xuất CSV
                 </button>
@@ -1123,7 +1123,7 @@ function App() {
               <SkeletonRows rows={8} />
             ) : (
             <div className="table-wrapper">
-              <table className="data-table">
+              <table className="data-table" data-testid="sessions-table">
                 <thead>
                   <tr>
                     <th>Phiên</th>
@@ -1171,7 +1171,7 @@ function App() {
       )}
 
       {activeTab === 'analytics' && (
-        <PageTransition key="analytics" className="page-stack page-view">
+        <PageTransition key="analytics" className="page-stack page-view" testId="view-analytics">
           {loadingAnalytics ? (
             <>
               <SkeletonRows rows={3} />
@@ -1179,7 +1179,7 @@ function App() {
             </>
           ) : (
           <>
-          <div className="stats-primary-grid">
+          <div className="stats-primary-grid" data-testid="analytics-cards">
             <div className="stat-card">
               <div className="stat-card-label">Đang trong thư viện</div>
               <div className="stat-card-value occupancy">{occupancy.current_occupancy}</div>
