@@ -2468,62 +2468,131 @@ input:checked + .slider::before {
 /* Toast */
 .toast-stack {
   position: fixed;
-  right: 18px;
-  bottom: 18px;
+  right: 20px;
+  bottom: 20px;
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-width: min(360px, calc(100vw - 36px));
+  gap: 10px;
+  max-width: min(380px, calc(100vw - 40px));
+  pointer-events: none;
 }
 
 .toast {
+  position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 11px 12px;
-  border: 1px solid var(--border);
+  flex-direction: column;
   border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: var(--shadow-toast);
-  font-size: 13px;
-  line-height: 1.4;
+  overflow: hidden;
+  pointer-events: auto;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .toast {
-    animation: toast-in 200ms ease-out;
-  }
+.toast-accent {
+  position: absolute;
+  inset: 0;
+  width: 3px;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  background: var(--accent);
 }
 
-.toast-success {
-  border-color: var(--semantic-entry-border);
+.toast-success .toast-accent {
+  background: var(--semantic-entry);
+}
+.toast-error .toast-accent {
+  background: var(--semantic-exit);
+}
+.toast-info .toast-accent {
+  background: var(--accent);
 }
 
-.toast-error {
-  border-color: var(--semantic-exit-border);
+.toast-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 13px 13px 18px;
 }
 
-.toast-info {
-  border-color: var(--accent-border);
+.toast-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+}
+
+.toast-success .toast-icon {
+  color: var(--semantic-entry);
+}
+.toast-error .toast-icon {
+  color: var(--semantic-exit);
+}
+.toast-info .toast-icon {
+  color: var(--accent);
 }
 
 .toast-message {
   flex: 1;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--text-primary);
+  word-break: break-word;
 }
 
 .toast-dismiss {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   border: 0;
-  padding: 2px;
-  color: var(--text-muted);
+  border-radius: var(--radius-sm);
   background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
 
 .toast-dismiss:hover {
+  background: var(--hover-subtle);
   color: var(--text-primary);
+}
+
+.toast-progress-track {
+  height: 3px;
+  background: var(--border);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  overflow: hidden;
+}
+
+.toast-progress-bar {
+  height: 100%;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  transition: width 0.1s linear;
+}
+
+.toast-success .toast-progress-bar {
+  background: var(--semantic-entry);
+}
+.toast-error .toast-progress-bar {
+  background: var(--semantic-exit);
+}
+.toast-info .toast-progress-bar {
+  background: var(--accent);
 }
 
 /* Empty state */

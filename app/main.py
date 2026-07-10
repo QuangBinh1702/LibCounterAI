@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import datetime
 import json
@@ -44,6 +45,12 @@ session_trackers = {}
 face_template_cache = {"loaded_at": 0.0, "items": []}
 FACE_TEMPLATE_CACHE_TTL_SECONDS = 10.0
 
+# Retention & privacy config
+UNKNOWN_IDENTITY_EXPIRE_HOURS = int(os.getenv("UNKNOWN_IDENTITY_EXPIRE_HOURS", "24"))
+UNKNOWN_EXPIRED_GRACE_HOURS = int(os.getenv("UNKNOWN_EXPIRED_GRACE_HOURS", "72"))
+RETENTION_CLEANUP_INTERVAL_SECONDS = int(os.getenv("RETENTION_CLEANUP_INTERVAL_SECONDS", "3600"))
+AUDIT_LOG_ENABLED = os.getenv("AUDIT_LOG_ENABLED", "true").lower() == "true"
+
 
 logger = logging.getLogger("libcounterai")
 if not logger.handlers:
@@ -79,6 +86,39 @@ def log_info(message: str) -> None:
         logger.info(message)
     except UnicodeEncodeError:
         logger.info(message.encode("ascii", errors="replace").decode("ascii"))
+
+def audit_log(
+    db: Session | None,
+    action: str,
+    entity_type: str,
+    entity_id: int | None = None,
+    actor: str | None = None,
+    details: dict | None = None,
+    ip_address: str | None = None,
+) -> None:
+    if not AUDIT_LOG_ENABLED:
+        return
+    try:
+        if db is None:
+            from database import SessionLocal as _SL
+            _db = _SL()
+            close = True
+        else:
+            _db = db
+            close = False
+        _db.add(models.AuditLog(
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            actor=actor,
+            details=details,
+            ip_address=ip_address,
+        ))
+        _db.commit()
+        if close:
+            _db.close()
+    except Exception as e:
+        log_info(f"Audit log failed: {e}")
 
 
 def cors_headers(request: Request) -> dict:
@@ -245,6 +285,105 @@ def infer_exit_identity_from_active_sessions(db: Session):
     identity["visit_session_id"] = active_sessions[0].id
     return identity, len(active_sessions)
 
+
+# ── Retention cleanup ──────────────────────────────────────────────
+
+_retention_running = False
+
+
+def _close_expired_sessions(db: Session, now: datetime.datetime) -> int:
+    expired = (
+        db.query(models.VisitSession)
+        .filter(
+            models.VisitSession.status == "ACTIVE",
+            models.VisitSession.entry_at < now - datetime.timedelta(hours=UNKNOWN_IDENTITY_EXPIRE_HOURS + 24),
+        )
+        .all()
+    )
+    count = 0
+    for sess in expired:
+        sess.status = "TIMEOUT"
+        sess.exit_at = sess.entry_at
+        sess.duration_seconds = 0
+        count += 1
+    if count:
+        db.commit()
+        log_info(f"Retention: closed {count} stale session(s)")
+    return count
+
+
+def _expire_unknown_identities(db: Session, now: datetime.datetime) -> int:
+    expired = (
+        db.query(models.UnknownIdentity)
+        .filter(
+            models.UnknownIdentity.status == "ACTIVE",
+            models.UnknownIdentity.expire_at <= now,
+        )
+        .all()
+    )
+    count = 0
+    for unk in expired:
+        unk.status = "EXPIRED"
+        count += 1
+    if count:
+        db.commit()
+        log_info(f"Retention: expired {count} unknown identit(ies)")
+        for unk in expired:
+            audit_log(None, "expire", "unknown_identity", unk.id, details={"anonymous_code": unk.anonymous_code})
+    return count
+
+
+def _purge_expired_embeddings(db: Session, now: datetime.datetime) -> int:
+    cutoff = now - datetime.timedelta(hours=UNKNOWN_EXPIRED_GRACE_HOURS)
+    expired = (
+        db.query(models.UnknownIdentity)
+        .filter(
+            models.UnknownIdentity.status == "EXPIRED",
+            models.UnknownIdentity.expire_at < cutoff,
+        )
+        .all()
+    )
+    count = 0
+    for unk in expired:
+        unk.embedding_vector = None
+        count += 1
+    if count:
+        db.commit()
+        log_info(f"Retention: purged embeddings of {count} expired unknown identit(ies)")
+    return count
+
+
+def _retention_cleanup():
+    from database import SessionLocal
+    global _retention_running
+    _retention_running = True
+    log_info("Retention cleanup worker started")
+    while _retention_running:
+        try:
+            db = SessionLocal()
+            try:
+                now = utc_now()
+                _close_expired_sessions(db, now)
+                _expire_unknown_identities(db, now)
+                _purge_expired_embeddings(db, now)
+            finally:
+                db.close()
+        except Exception as e:
+            log_info(f"Retention cleanup error: {e}")
+        time.sleep(RETENTION_CLEANUP_INTERVAL_SECONDS)
+    _retention_running = False
+
+
+def start_retention_cleanup():
+    thread = threading.Thread(target=_retention_cleanup, daemon=True)
+    thread.start()
+    return thread
+
+
+def stop_retention_cleanup():
+    global _retention_running
+    _retention_running = False
+
 @app.on_event("startup")
 def load_models():
     global detector, face_pipeline
@@ -257,6 +396,8 @@ def load_models():
     print("FacePipeline ONNX Models loaded successfully.")
     sync_service.start()
     print("Offline sync service started.")
+    start_retention_cleanup()
+    print("Retention cleanup started.")
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
@@ -1119,6 +1260,133 @@ async def get_hourly_stats(
             hourly_data[hour]["exit"] += 1
 
     return [{"hour": h, "entry": d["entry"], "exit": d["exit"]} for h, d in hourly_data.items()]
+
+
+# ── Retention & audit endpoints ────────────────────────────────────
+
+
+@app.get("/api/admin/expired-unknowns")
+async def get_expired_unknowns(db: Session = Depends(get_db)):
+    expired = (
+        db.query(models.UnknownIdentity)
+        .filter(models.UnknownIdentity.status == "EXPIRED")
+        .order_by(models.UnknownIdentity.expire_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": u.id,
+            "anonymous_code": u.anonymous_code,
+            "expire_at": u.expire_at.isoformat() if u.expire_at else None,
+            "visit_count": u.visit_count,
+            "has_embedding": u.embedding_vector is not None,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in expired
+    ]
+
+
+@app.post("/api/admin/retention/cleanup")
+async def trigger_retention_cleanup(db: Session = Depends(get_db)):
+    now = utc_now()
+    closed = _close_expired_sessions(db, now)
+    expired = _expire_unknown_identities(db, now)
+    purged = _purge_expired_embeddings(db, now)
+    return {
+        "closed_sessions": closed,
+        "expired_identities": expired,
+        "purged_embeddings": purged,
+        "timestamp": now.isoformat(),
+    }
+
+
+@app.get("/api/admin/audit-log")
+async def get_audit_log(
+    db: Session = Depends(get_db),
+    action: str | None = None,
+    entity_type: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    query = db.query(models.AuditLog)
+    if action:
+        query = query.filter(models.AuditLog.action == action)
+    if entity_type:
+        query = query.filter(models.AuditLog.entity_type == entity_type)
+    entries = query.order_by(models.AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    return [
+        {
+            "id": e.id,
+            "action": e.action,
+            "entity_type": e.entity_type,
+            "entity_id": e.entity_id,
+            "actor": e.actor,
+            "details": e.details,
+            "ip_address": e.ip_address,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]
+
+
+@app.get("/api/persons/{person_id}/templates")
+async def get_person_templates(person_id: int, db: Session = Depends(get_db)):
+    person = db.query(models.Person).filter_by(id=person_id).first()
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    templates = (
+        db.query(models.FaceTemplate)
+        .filter_by(person_id=person_id)
+        .order_by(models.FaceTemplate.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": t.id,
+            "model_name": t.model_name,
+            "model_version": t.model_version,
+            "quality_score": t.quality_score,
+            "source_type": t.source_type,
+            "is_active": t.is_active,
+            "has_embedding": t.embedding_vector is not None,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        }
+        for t in templates
+    ]
+
+
+@app.delete("/api/persons/{person_id}/templates/{template_id}")
+async def delete_person_template(
+    person_id: int,
+    template_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    person = db.query(models.Person).filter_by(id=person_id).first()
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    template = db.query(models.FaceTemplate).filter_by(id=template_id, person_id=person_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Face template not found")
+    db.delete(template)
+    db.commit()
+    invalidate_face_template_cache()
+    audit_log(
+        db, "delete", "face_template", template_id,
+        details={"person_id": person_id, "person_name": person.full_name},
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"message": "Face template deleted", "template_id": template_id}
+
+
+@app.get("/api/admin/retention/config")
+async def get_retention_config():
+    return {
+        "unknown_identity_expire_hours": UNKNOWN_IDENTITY_EXPIRE_HOURS,
+        "unknown_expired_grace_hours": UNKNOWN_EXPIRED_GRACE_HOURS,
+        "retention_cleanup_interval_seconds": RETENTION_CLEANUP_INTERVAL_SECONDS,
+        "audit_log_enabled": AUDIT_LOG_ENABLED,
+    }
 
 class CameraCreate(BaseModel):
     name: str

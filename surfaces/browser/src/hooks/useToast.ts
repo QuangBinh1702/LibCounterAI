@@ -6,6 +6,7 @@ export interface ToastItem {
   id: string;
   message: string;
   type: ToastType;
+  duration?: number;
 }
 
 export function useToast() {
@@ -15,10 +16,10 @@ export function useToast() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const show = useCallback((message: string, type: ToastType = 'info') => {
+  const show = useCallback((message: string, type: ToastType = 'info', duration = 3800) => {
     const id = crypto.randomUUID();
-    setToasts((prev) => [...prev, { id, message, type }]);
-    window.setTimeout(() => dismiss(id), 3800);
+    setToasts((prev) => [...prev, { id, message, type, duration }]);
+    window.setTimeout(() => dismiss(id), duration);
   }, [dismiss]);
 
   return { toasts, show, dismiss };
