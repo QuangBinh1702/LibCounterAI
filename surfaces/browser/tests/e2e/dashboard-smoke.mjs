@@ -80,7 +80,7 @@ async function addApiRoutes(page) {
     });
   });
 
-  await page.route('http://localhost:8000/api/stats/occupancy', async (route) => {
+  await page.route('http://localhost:8000/api/stats/occupancy**', async (route) => {
     await route.fulfill({
       status: 200,
       headers: jsonHeaders,
@@ -95,7 +95,7 @@ async function addApiRoutes(page) {
     });
   });
 
-  await page.route('http://localhost:8000/api/stats/hourly', async (route) => {
+  await page.route('http://localhost:8000/api/stats/hourly**', async (route) => {
     await route.fulfill({
       status: 200,
       headers: jsonHeaders,
@@ -144,15 +144,18 @@ async function runSmoke() {
     assert(sessionsText.includes('UNKNOWN_20260706_0001'), 'History did not render the mocked unknown session.');
 
     const downloadPromise = page.waitForEvent('download');
+    await page.getByTestId('export-menu').click();
     await page.getByTestId('export-csv').click();
     const download = await downloadPromise;
     assert(
-      /^libcounterai_sessions_\d{4}-\d{2}-\d{2}\.csv$/.test(download.suggestedFilename()),
+      /^libcounterai_sessions_\d{4}-\d{2}-\d{2}(?:_\d{4}-\d{2}-\d{2})?\.csv$/.test(download.suggestedFilename()),
       `Unexpected CSV filename: ${download.suggestedFilename()}`,
     );
 
     await page.getByTestId('nav-analytics').click();
     await page.getByTestId('view-analytics').waitFor({ state: 'visible' });
+    await page.getByTestId('period-filter').waitFor({ state: 'visible' });
+    await page.getByTestId('traffic-chart').waitFor({ state: 'visible' });
     const analyticsText = await page.getByTestId('analytics-cards').innerText();
     assert(analyticsText.includes('1'), 'Analytics did not render current occupancy.');
     assert(analyticsText.includes('2'), 'Analytics did not render entry count.');

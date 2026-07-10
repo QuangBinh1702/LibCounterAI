@@ -14,10 +14,10 @@ import {
   ArrowLineUpRight,
   FileText,
   UserPlus,
-  DownloadSimple,
-  ArrowsClockwise,
   Plus,
   Plugs,
+  Pencil,
+  X,
 } from '@phosphor-icons/react';
 import { AnimatePresence } from 'framer-motion';
 import { ToastContainer } from './components/Toast';
@@ -25,22 +25,42 @@ import { ThemeToggle } from './components/ThemeToggle';
 import { NavTabs } from './components/NavTabs';
 import { PageTransition } from './components/PageTransition';
 import { SkeletonRows } from './components/Skeleton';
+import { PeriodFilter } from './components/PeriodFilter';
+import { ExportMenu, type ExportFormat } from './components/ExportMenu';
+import { TrafficChart } from './components/TrafficChart';
 import { useToast } from './hooks/useToast';
 import { readThemeColors, useTheme } from './hooks/useTheme';
+import {
+  formatRangeLabel,
+  periodQuery,
+  periodShortLabel,
+  rangeForPreset,
+  type PeriodPreset,
+} from './utils/dateRange';
+import {
+  exportSessionsCsv,
+  exportSessionsExcel,
+  exportSessionsPdf,
+} from './utils/exportSessions';
 
 interface Track {
   track_id: number;
   bbox: [number, number, number, number];
   confidence: number;
   person_name?: string;
-  identity_type?: 'KNOWN' | 'UNKNOWN';
+  identity_type?: 'KNOWN' | 'UNKNOWN' | 'UNRESOLVED';
   similarity_score?: number;
+  predicted?: boolean;
+  lost?: number;
 }
 
 interface CrossingEvent {
   track_id: number;
   direction: 'ENTRY' | 'EXIT';
   timestamp: number;
+  person_name?: string;
+  identity_type?: 'KNOWN' | 'UNKNOWN' | 'UNRESOLVED';
+  similarity_score?: number;
 }
 
 interface LogItem {
@@ -88,6 +108,15 @@ type LogFilter = 'all' | 'entry' | 'exit' | 'system';
 
 const ICON = { size: 16, weight: 'regular' as const };
 const ICON_SM = { size: 14, weight: 'regular' as const };
+const CAPTURE_WIDTH = 640;
+const CAPTURE_HEIGHT = 480;
+const JPEG_QUALITY = 0.65;
+const TARGET_FRAME_INTERVAL_MS = 66;
+const DETECTION_INTERVAL_FRAMES = 3;
+const INITIAL_DETECTION_FRAMES = 2;
+const IDENTITY_PROBE_INTERVAL_FRAMES = 8;
+const INITIAL_IDENTITY_PROBE_FRAMES = 3;
+const IDENTITY_TTL_SECONDS = 5;
 
 const NAV_TABS = [
   { id: 'monitor' as const, label: 'Giám sát', Icon: VideoCamera },
@@ -112,10 +141,17 @@ function App() {
   const [logFilter, setLogFilter] = useState<LogFilter>('all');
 
   const [backendUrl, setBackendUrl] = useState('http://localhost:8000');
+
+  const apiUrl = (path: string) => {
+    const base = backendUrl.trim().replace(/\/$/, '');
+    const suffix = path.startsWith('/') ? path : `/${path}`;
+    return `${base}${suffix}`;
+  };
   const [isBackendOnline, setIsBackendOnline] = useState(false);
   const [sourceType, setSourceType] = useState<'webcam' | 'video' | 'none'>('none');
   const [isRunning, setIsRunning] = useState(false);
   const [fps, setFps] = useState(0);
+  const [responseLatencyMs, setResponseLatencyMs] = useState(0);
   const [activeTracksCount, setActiveTracksCount] = useState(0);
 
   const [entriesCount, setEntriesCount] = useState(0);
@@ -127,8 +163,8 @@ function App() {
   const [showTrackIds, setShowTrackIds] = useState(true);
 
   const [lineConfig, setLineConfig] = useState<[[number, number], [number, number]]>([
-    [100, 360],
-    [540, 360],
+    [320, 0],
+    [320, 480],
   ]);
   const [isDrawing, setIsDrawing] = useState(false);
 
@@ -142,9 +178,38 @@ function App() {
   const [regRole, setRegRole] = useState('STUDENT');
   const [regStatus, setRegStatus] = useState('ACTIVE');
   const [regPhoto, setRegPhoto] = useState<File | null>(null);
+  const [editingPerson, setEditingPerson] = useState<Person | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editCode, setEditCode] = useState('');
+  const [editRole, setEditRole] = useState('STUDENT');
+  const [editStatus, setEditStatus] = useState('ACTIVE');
+  const [editPhoto, setEditPhoto] = useState<File | null>(null);
+
+  const startEditPerson = (person: Person) => {
+    setEditingPerson(person);
+    setEditName(person.full_name);
+    setEditCode(person.member_code);
+    setEditRole(person.role);
+    setEditStatus(person.status);
+    setEditPhoto(null);
+  };
+
+  const cancelEditPerson = () => {
+    setEditingPerson(null);
+    setEditName('');
+    setEditCode('');
+    setEditRole('STUDENT');
+    setEditStatus('ACTIVE');
+    setEditPhoto(null);
+  };
 
   const [sessions, setSessions] = useState<VisitSession[]>([]);
-  const [filterDate, setFilterDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const initialRange = rangeForPreset('day');
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('day');
+  const [rangeFrom, setRangeFrom] = useState(initialRange.from);
+  const [rangeTo, setRangeTo] = useState(initialRange.to);
+  const [draftFrom, setDraftFrom] = useState(initialRange.from);
+  const [draftTo, setDraftTo] = useState(initialRange.to);
 
   const [occupancy, setOccupancy] = useState<OccupancyStats>({
     current_occupancy: 0,
@@ -170,12 +235,15 @@ function App() {
   const sessionTrackerIdRef = useRef<string>(`session_${Math.floor(Date.now() / 1000)}`);
   const streamRef = useRef<MediaStream | null>(null);
   const lastFrameTimeRef = useRef<number>(0);
+  const isRunningRef = useRef(false);
+  const frameSequenceRef = useRef(0);
+  const processedFramesRef = useRef(0);
 
   useEffect(() => {
     let active = true;
     const checkHealth = async () => {
       try {
-        const res = await fetch(`${backendUrl}/api/health`);
+        const res = await fetch(`${apiUrl('/api/health')}`);
         if (active) setIsBackendOnline(res.ok);
       } catch {
         if (active) setIsBackendOnline(false);
@@ -191,8 +259,9 @@ function App() {
   }, [backendUrl]);
 
   useEffect(() => {
+    // Overlay only — do not tear down the live stream when sourceType flips to webcam/video.
+    // startWebcam / handleVideoUpload / stopWebcam own stream lifecycle.
     stopPipeline();
-    stopCameraStream();
     clearOverlayCanvas();
   }, [sourceType]);
 
@@ -202,11 +271,11 @@ function App() {
     } else if (activeTab === 'registry') {
       loadPersons();
     } else if (activeTab === 'history') {
-      loadSessions();
+      loadFilteredSessions();
     } else if (activeTab === 'analytics') {
       loadAnalytics();
     }
-  }, [activeTab, backendUrl]);
+  }, [activeTab, backendUrl, rangeFrom, rangeTo]);
 
   useEffect(() => {
     loadCameras();
@@ -218,7 +287,7 @@ function App() {
 
   const loadCameras = async () => {
     try {
-      const res = await fetch(`${backendUrl}/api/cameras`);
+      const res = await fetch(`${apiUrl('/api/cameras')}`);
       if (res.ok) setCamerasList(await res.json());
     } catch (err) {
       console.error('Failed to load cameras:', err);
@@ -231,7 +300,7 @@ function App() {
       return;
     }
     try {
-      const res = await fetch(`${backendUrl}/api/cameras`, {
+      const res = await fetch(`${apiUrl('/api/cameras')}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -256,7 +325,7 @@ function App() {
 
   const testCamera = async (id: number) => {
     try {
-      const res = await fetch(`${backendUrl}/api/cameras/${id}/test`, { method: 'POST' });
+      const res = await fetch(`${apiUrl(`/api/cameras/${id}/test`)}`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         showToast(`Kiểm tra kết nối: ${data.status}`, 'success');
@@ -272,7 +341,7 @@ function App() {
   const loadPersons = async () => {
     setLoadingRegistry(true);
     try {
-      const res = await fetch(`${backendUrl}/api/persons`);
+      const res = await fetch(`${apiUrl('/api/persons')}`);
       if (res.ok) setPersons(await res.json());
     } catch (err) {
       console.error('Failed to load persons:', err);
@@ -282,25 +351,46 @@ function App() {
     }
   };
 
-  const loadSessions = async () => {
-    setLoadingHistory(true);
-    try {
-      const res = await fetch(`${backendUrl}/api/sessions`);
-      if (res.ok) setSessions(await res.json());
-    } catch (err) {
-      console.error('Failed to load sessions:', err);
-      showToast('Không tải được lịch sử phiên.', 'error');
-    } finally {
-      setLoadingHistory(false);
+  const parseSessionResponse = (data: unknown): VisitSession[] => {
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === 'object' && 'items' in data && Array.isArray((data as { items: VisitSession[] }).items)) {
+      return (data as { items: VisitSession[] }).items;
     }
+    return [];
+  };
+
+  const reportQuery = () => periodQuery({ from: rangeFrom, to: rangeTo });
+  const activeRangeLabel = formatRangeLabel({ from: rangeFrom, to: rangeTo }, periodPreset);
+
+  const applyPeriodPreset = (preset: PeriodPreset) => {
+    const next = rangeForPreset(preset);
+    setPeriodPreset(preset);
+    setDraftFrom(next.from);
+    setDraftTo(next.to);
+    setRangeFrom(next.from);
+    setRangeTo(next.to);
+  };
+
+  const applyCustomRange = () => {
+    if (!draftFrom || !draftTo) {
+      showToast('Vui lòng chọn đầy đủ ngày bắt đầu và kết thúc.', 'error');
+      return;
+    }
+    if (draftFrom > draftTo) {
+      showToast('Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.', 'error');
+      return;
+    }
+    setPeriodPreset(draftFrom === draftTo ? 'day' : 'week');
+    setRangeFrom(draftFrom);
+    setRangeTo(draftTo);
   };
 
   const loadFilteredSessions = async () => {
     setLoadingHistory(true);
     try {
-      const res = await fetch(`${backendUrl}/api/sessions?date=${filterDate}`);
-      if (res.ok) setSessions(await res.json());
-      else showToast('Không lọc được dữ liệu theo ngày.', 'error');
+      const res = await fetch(`${apiUrl(`/api/sessions?${reportQuery()}`)}`);
+      if (res.ok) setSessions(parseSessionResponse(await res.json()));
+      else showToast('Không lọc được dữ liệu theo khoảng đã chọn.', 'error');
     } catch (err) {
       console.error('Failed to load filtered sessions:', err);
       showToast('Không tải được lịch sử phiên.', 'error');
@@ -312,11 +402,18 @@ function App() {
   const loadAnalytics = async () => {
     setLoadingAnalytics(true);
     try {
-      const resOcc = await fetch(`${backendUrl}/api/stats/occupancy`);
-      const resHourly = await fetch(`${backendUrl}/api/stats/hourly`);
+      const q = reportQuery();
+      const resOcc = await fetch(`${apiUrl(`/api/stats/occupancy?${q}`)}`);
+      const resHourly = await fetch(`${apiUrl(`/api/stats/hourly?${q}`)}`);
       if (resOcc.ok && resHourly.ok) {
         setOccupancy(await resOcc.json());
-        setHourlyStats(await resHourly.json());
+        const hourly = await resHourly.json();
+        const byHour = new Map<number, HourlyStat>(
+          (Array.isArray(hourly) ? hourly : []).map((s: HourlyStat) => [s.hour, s]),
+        );
+        setHourlyStats(
+          Array.from({ length: 24 }, (_, hour) => byHour.get(hour) ?? { hour, entry: 0, exit: 0 }),
+        );
       } else {
         showToast('Không tải được dữ liệu thống kê.', 'error');
       }
@@ -342,7 +439,7 @@ function App() {
     formData.append('file', regPhoto);
 
     try {
-      const res = await fetch(`${backendUrl}/api/persons/register`, {
+      const res = await fetch(`${apiUrl('/api/persons/register')}`, {
         method: 'POST',
         body: formData,
       });
@@ -363,10 +460,43 @@ function App() {
     }
   };
 
+  const handleUpdatePerson = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPerson || !editName || !editCode || !editRole) {
+      showToast('Vui lòng điền đầy đủ thông tin.', 'error');
+      return;
+    }
+    const formData = new FormData();
+    formData.append('full_name', editName);
+    formData.append('member_code', editCode);
+    formData.append('role', editRole);
+    formData.append('status', editStatus);
+    if (editPhoto) {
+      formData.append('file', editPhoto);
+    }
+
+    try {
+      const res = await fetch(`${apiUrl(`/api/persons/${editingPerson.id}`)}`, {
+        method: 'PUT',
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        showToast(`Cập nhật thất bại: ${err.detail || 'Lỗi không xác định'}`, 'error');
+        return;
+      }
+      showToast('Cập nhật thành viên thành công.', 'success');
+      setEditingPerson(null);
+      loadPersons();
+    } catch (err) {
+      showToast(`Lỗi kết nối backend: ${err}`, 'error');
+    }
+  };
+
   const handleDeletePerson = async (id: number) => {
     if (!window.confirm('Bạn có chắc muốn xóa thành viên này? Dữ liệu sinh trắc học sẽ bị xóa hoàn toàn.')) return;
     try {
-      const res = await fetch(`${backendUrl}/api/persons/${id}`, { method: 'DELETE' });
+      const res = await fetch(`${apiUrl(`/api/persons/${id}`)}`, { method: 'DELETE' });
       if (res.ok) {
         showToast('Đã xóa thành viên.', 'success');
         loadPersons();
@@ -389,20 +519,46 @@ function App() {
   const startWebcam = async () => {
     try {
       stopCameraStream();
+      if (videoRef.current) {
+        videoRef.current.removeAttribute('src');
+        videoRef.current.load();
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, frameRate: 15 },
+        video: { width: CAPTURE_WIDTH, height: CAPTURE_HEIGHT, frameRate: 30, facingMode: 'user' },
+        audio: false,
       });
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
+
+      const video = videoRef.current;
+      if (!video) {
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        throw new Error('Video element is not ready');
       }
+
+      video.srcObject = stream;
+      video.muted = true;
+      await video.play();
       setSourceType('webcam');
       addLog('Đã kết nối webcam.', 'system');
     } catch (err) {
+      stopCameraStream();
+      setSourceType('none');
       showToast(`Không thể truy cập webcam: ${err}`, 'error');
       console.error(err);
     }
+  };
+
+  const stopWebcam = () => {
+    stopPipeline();
+    stopCameraStream();
+    setSourceType('none');
+    setActiveTracksCount(0);
+    setFps(0);
+    setResponseLatencyMs(0);
+    clearOverlayCanvas();
+    addLog('Đã tắt webcam.', 'system');
   };
 
   const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -421,7 +577,7 @@ function App() {
   };
 
   const togglePipeline = () => {
-    if (isRunning) stopPipeline();
+    if (isRunningRef.current) stopPipeline();
     else startPipeline();
   };
 
@@ -430,7 +586,12 @@ function App() {
       showToast('Hãy kết nối webcam hoặc tải video trước.', 'error');
       return;
     }
+    isRunningRef.current = true;
+    frameSequenceRef.current += 1;
+    processedFramesRef.current = 0;
     setIsRunning(true);
+    setFps(0);
+    setResponseLatencyMs(0);
     lastFrameTimeRef.current = performance.now();
     sessionTrackerIdRef.current = `session_${Math.floor(Date.now() / 1000)}`;
     addLog(`Bắt đầu phân tích (phiên ${sessionTrackerIdRef.current})`, 'system');
@@ -438,56 +599,92 @@ function App() {
   };
 
   const stopPipeline = () => {
-    if (!isRunning && loopTimeoutRef.current === null) return;
+    if (!isRunningRef.current && loopTimeoutRef.current === null) return;
+    const wasRunning = isRunningRef.current;
+    isRunningRef.current = false;
+    frameSequenceRef.current += 1;
     setIsRunning(false);
     if (loopTimeoutRef.current !== null) {
       clearTimeout(loopTimeoutRef.current);
       loopTimeoutRef.current = null;
     }
-    if (isRunning) addLog('Đã dừng phân tích.', 'system');
+    if (wasRunning) addLog('Đã dừng phân tích.', 'system');
   };
 
-  const scheduleNextFrame = () => {
+  const scheduleNextFrame = (delayMs = 0) => {
     if (loopTimeoutRef.current !== null) clearTimeout(loopTimeoutRef.current);
     loopTimeoutRef.current = window.setTimeout(async () => {
-      if (!isRunning) return;
+      if (!isRunningRef.current) return;
+      const startedAt = performance.now();
       await processCurrentFrame();
-      scheduleNextFrame();
-    }, 100);
+      const elapsed = performance.now() - startedAt;
+      if (isRunningRef.current) scheduleNextFrame(Math.max(0, TARGET_FRAME_INTERVAL_MS - elapsed));
+    }, delayMs);
   };
 
   const processCurrentFrame = async () => {
+    const frameSequence = frameSequenceRef.current;
+    const sessionId = sessionTrackerIdRef.current;
     const video = videoRef.current;
-    if (!video || video.paused || video.ended) return;
+    if (!video || video.ended) return;
+    // Webcam/MediaStream can briefly report paused while still producing frames.
+    if (video.paused && !video.srcObject) return;
 
     const offscreenCanvas = document.createElement('canvas');
-    offscreenCanvas.width = 640;
-    offscreenCanvas.height = 480;
+    offscreenCanvas.width = CAPTURE_WIDTH;
+    offscreenCanvas.height = CAPTURE_HEIGHT;
     const ctx = offscreenCanvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.drawImage(video, 0, 0, 640, 480);
+    ctx.drawImage(video, 0, 0, CAPTURE_WIDTH, CAPTURE_HEIGHT);
 
     const blob = await new Promise<Blob | null>((resolve) => {
-      offscreenCanvas.toBlob((b) => resolve(b), 'image/jpeg', 0.85);
+      offscreenCanvas.toBlob((b) => resolve(b), 'image/jpeg', JPEG_QUALITY);
     });
     if (!blob) return;
 
     const formData = new FormData();
+    const frameIndex = processedFramesRef.current;
+    const shouldProbeIdentity = frameIndex < INITIAL_IDENTITY_PROBE_FRAMES || frameIndex % IDENTITY_PROBE_INTERVAL_FRAMES === 0;
+    const shouldDetect =
+      frameIndex < INITIAL_DETECTION_FRAMES ||
+      frameIndex % DETECTION_INTERVAL_FRAMES === 0 ||
+      shouldProbeIdentity;
+    processedFramesRef.current += 1;
     formData.append('file', blob, 'frame.jpg');
-    formData.append('session_id', sessionTrackerIdRef.current);
+    formData.append('session_id', sessionId);
     formData.append('line_config', JSON.stringify(lineConfig));
+    formData.append('fast_mode', 'true');
+    formData.append('identity_probe', shouldProbeIdentity ? 'true' : 'false');
+    formData.append('detect_frame', shouldDetect ? 'true' : 'false');
+    formData.append('identity_ttl_seconds', String(IDENTITY_TTL_SECONDS));
 
     try {
-      const response = await fetch(`${backendUrl}/api/process-frame`, {
-        method: 'POST',
-        body: formData,
-      });
-      if (!response.ok) throw new Error('API server returned error');
+        const requestStart = performance.now();
+        const response = await fetch(`${apiUrl('/api/process-frame')}`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!response.ok) {
+          let detail = `API server returned ${response.status}`;
+          try {
+            const errBody = await response.json();
+            if (errBody?.detail || errBody?.error) {
+              detail = `${errBody.error || 'error'}: ${errBody.detail || response.status}`;
+            }
+          } catch {
+            // ignore JSON parse errors
+          }
+          throw new Error(detail);
+        }
 
       const result = await response.json();
+      if (!isRunningRef.current || frameSequence !== frameSequenceRef.current || sessionId !== sessionTrackerIdRef.current) return;
+
       const endTime = performance.now();
-      setFps(Math.round(1000 / (endTime - lastFrameTimeRef.current)));
+      const frameDelta = Math.max(1, endTime - lastFrameTimeRef.current);
+      setFps(Math.round(1000 / frameDelta));
+      setResponseLatencyMs(Math.round(result.processing_ms || (endTime - requestStart)));
       lastFrameTimeRef.current = endTime;
 
       const tracks: Track[] = result.tracks || [];
@@ -498,7 +695,58 @@ function App() {
       handleCrossingEvents(tracks, crossingEvents);
     } catch (err) {
       console.error('Frame processing failed:', err);
+      addLog(`Lỗi xử lý frame: ${err instanceof Error ? err.message : String(err)}`, 'system');
     }
+  };
+
+  const drawLineGuide = (
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    colors: ReturnType<typeof readThemeColors>,
+  ) => {
+    const [p1, p2] = lineConfig;
+    const mirrorX = (x: number) => (sourceType === 'webcam' ? canvas.width - x : x);
+    const x1 = mirrorX(p1[0]);
+    const x2 = mirrorX(p2[0]);
+    const centerX = (x1 + x2) / 2;
+    const centerY = (p1[1] + p2[1]) / 2;
+
+    ctx.save();
+    let entryDx = -(p2[1] - p1[1]);
+    let entryDy = p2[0] - p1[0];
+    const len = Math.hypot(entryDx, entryDy) || 1;
+    entryDx /= len;
+    entryDy /= len;
+    if (sourceType === 'webcam') entryDx *= -1;
+
+    const drawDirectionalArrow = (label: string, dx: number, dy: number, color: string) => {
+      const startX = centerX - dx * 18;
+      const startY = centerY - dy * 18;
+      const endX = centerX + dx * 48;
+      const endY = centerY + dy * 48;
+      const angle = Math.atan2(endY - startY, endX - startX);
+
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - 10 * Math.cos(angle - Math.PI / 6), endY - 10 * Math.sin(angle - Math.PI / 6));
+      ctx.lineTo(endX - 10 * Math.cos(angle + Math.PI / 6), endY - 10 * Math.sin(angle + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.font = '700 12px Outfit, sans-serif';
+      ctx.fillText(label, endX + dx * 8 - 12, endY + dy * 8 + 4);
+    };
+
+    drawDirectionalArrow('Vào', entryDx, entryDy, colors.entry);
+    drawDirectionalArrow('Ra', -entryDx, -entryDy, colors.exit);
+    ctx.restore();
   };
 
   const drawOverlay = (tracks: Track[]) => {
@@ -507,42 +755,53 @@ function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const colors = readThemeColors();
+    const mirrorX = (x: number) => (sourceType === 'webcam' ? canvas.width - x : x);
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (showLine) {
       const [p1, p2] = lineConfig;
+      const x1 = mirrorX(p1[0]);
+      const x2 = mirrorX(p2[0]);
       ctx.beginPath();
-      ctx.moveTo(p1[0], p1[1]);
-      ctx.lineTo(p2[0], p2[1]);
+      ctx.moveTo(x1, p1[1]);
+      ctx.lineTo(x2, p2[1]);
       ctx.lineWidth = 3;
       ctx.strokeStyle = colors.accent;
       ctx.stroke();
 
       ctx.fillStyle = colors.accent;
       ctx.beginPath();
-      ctx.arc(p1[0], p1[1], 5, 0, Math.PI * 2);
-      ctx.arc(p2[0], p2[1], 5, 0, Math.PI * 2);
+      ctx.arc(x1, p1[1], 5, 0, Math.PI * 2);
+      ctx.arc(x2, p2[1], 5, 0, Math.PI * 2);
       ctx.fill();
 
       ctx.font = '600 11px Outfit, sans-serif';
       ctx.fillStyle = colors.accent;
-      ctx.fillText('Hướng vào', (p1[0] + p2[0]) / 2 - 28, (p1[1] + p2[1]) / 2 - 10);
+      ctx.fillText('Hướng vào', (x1 + x2) / 2 - 28, (p1[1] + p2[1]) / 2 - 10);
+    }
+
+    if (showLine) {
+      drawLineGuide(ctx, canvas, colors);
     }
 
     if (showBboxes) {
       tracks.forEach((track) => {
-        const [x1, y1, x2, y2] = track.bbox;
+        const [bx1, by1, bx2, by2] = track.bbox;
+        const x1 = Math.min(mirrorX(bx1), mirrorX(bx2));
+        const x2 = Math.max(mirrorX(bx1), mirrorX(bx2));
         const width = x2 - x1;
-        const height = y2 - y1;
+        const height = by2 - by1;
         const isKnown = track.identity_type === 'KNOWN';
         const color = isKnown ? colors.entry : colors.exit;
 
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
-        ctx.strokeRect(x1, y1, width, height);
+        ctx.setLineDash(track.predicted ? [8, 5] : []);
+        ctx.strokeRect(x1, by1, width, height);
+        ctx.setLineDash([]);
         ctx.fillStyle = isKnown ? colors.entryFill : colors.exitFill;
-        ctx.fillRect(x1, y1, width, height);
+        ctx.fillRect(x1, by1, width, height);
 
         if (showTrackIds) {
           const name = isKnown ? track.person_name : 'Khách';
@@ -550,9 +809,9 @@ function App() {
           ctx.font = '600 11px JetBrains Mono, monospace';
           const textWidth = ctx.measureText(label).width;
           ctx.fillStyle = color;
-          ctx.fillRect(x1, y1 - 20, textWidth + 10, 20);
+          ctx.fillRect(x1, by1 - 20, textWidth + 10, 20);
           ctx.fillStyle = colors.labelFg;
-          ctx.fillText(label, x1 + 4, y1 - 5);
+          ctx.fillText(label, x1 + 4, by1 - 5);
         }
       });
     }
@@ -574,17 +833,25 @@ function App() {
   const handleCrossingEvents = (tracks: Track[], events: CrossingEvent[]) => {
     events.forEach((event) => {
       const track = tracks.find((t) => t.track_id === event.track_id);
+      if (event.person_name && track) {
+        track.person_name = event.person_name;
+        track.identity_type = event.identity_type || track.identity_type;
+      }
       const name = track?.person_name || 'Khách';
-      const type = track?.identity_type || 'UNKNOWN';
+      const type = event.identity_type || track?.identity_type || 'UNKNOWN';
+      const typeLabel =
+        type === 'KNOWN' ? 'đã biết' :
+        type === 'UNRESOLVED' ? 'chưa xác định' :
+        'khách';
 
       if (event.direction === 'ENTRY') {
         setEntriesCount((prev) => prev + 1);
         triggerCounterPulse('entry');
-        addLog(`Vào: ${name} (${type === 'KNOWN' ? 'đã biết' : 'khách'}) #${event.track_id}`, 'entry');
+        addLog(`Vào: ${name} (${typeLabel}) #${event.track_id}`, 'entry');
       } else if (event.direction === 'EXIT') {
         setExitsCount((prev) => prev + 1);
         triggerCounterPulse('exit');
-        addLog(`Ra: ${name} (${type === 'KNOWN' ? 'đã biết' : 'khách'}) #${event.track_id}`, 'exit');
+        addLog(`Ra: ${name} (${typeLabel}) #${event.track_id}`, 'exit');
       }
     });
   };
@@ -595,21 +862,25 @@ function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const colors = readThemeColors();
+    const mirrorX = (x: number) => (sourceType === 'webcam' ? canvas.width - x : x);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (sourceType !== 'none' && showLine) {
       const [p1, p2] = lineConfig;
+      const x1 = mirrorX(p1[0]);
+      const x2 = mirrorX(p2[0]);
       ctx.beginPath();
-      ctx.moveTo(p1[0], p1[1]);
-      ctx.lineTo(p2[0], p2[1]);
+      ctx.moveTo(x1, p1[1]);
+      ctx.lineTo(x2, p2[1]);
       ctx.lineWidth = 3;
       ctx.strokeStyle = colors.accent;
       ctx.stroke();
       ctx.fillStyle = colors.accent;
       ctx.beginPath();
-      ctx.arc(p1[0], p1[1], 5, 0, Math.PI * 2);
-      ctx.arc(p2[0], p2[1], 5, 0, Math.PI * 2);
+      ctx.arc(x1, p1[1], 5, 0, Math.PI * 2);
+      ctx.arc(x2, p2[1], 5, 0, Math.PI * 2);
       ctx.fill();
+      drawLineGuide(ctx, canvas, colors);
     }
   };
 
@@ -617,8 +888,12 @@ function App() {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return [0, 0];
     const rect = canvas.getBoundingClientRect();
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
+    let x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
     const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
+    // Webcam preview is mirrored in CSS; store line points in raw (unmirrored) frame space.
+    if (sourceType === 'webcam') {
+      x = canvas.width - x;
+    }
     return [x, y];
   };
 
@@ -658,34 +933,28 @@ function App() {
     addLog('Đã xóa thống kê và nhật ký.', 'system');
   };
 
-  const exportToCSV = () => {
-    if (sessions.length === 0) {
-      showToast('Không có dữ liệu phiên để xuất.', 'error');
-      return;
+  const handleExport = async (format: ExportFormat) => {
+    try {
+      let rows = sessions;
+      const res = await fetch(`${apiUrl(`/api/sessions?${reportQuery()}`)}`);
+      if (res.ok) {
+        rows = parseSessionResponse(await res.json());
+        setSessions(rows);
+      }
+      if (rows.length === 0) {
+        showToast('Không có dữ liệu phiên trong khoảng đã lọc để xuất.', 'error');
+        return;
+      }
+      if (format === 'csv') exportSessionsCsv(rows, rangeFrom, rangeTo);
+      else if (format === 'excel') exportSessionsExcel(rows, rangeFrom, rangeTo);
+      else exportSessionsPdf(rows, rangeFrom, rangeTo, activeRangeLabel);
+      showToast(`Đã xuất báo cáo ${format.toUpperCase()} theo ${periodShortLabel(periodPreset)}.`, 'success');
+    } catch (err) {
+      console.error('Export failed:', err);
+      showToast('Xuất file thất bại.', 'error');
     }
-    const headers = ['Session ID', 'Person Name', 'Member Code', 'Identity Type', 'Entry Time', 'Exit Time', 'Duration (s)', 'Status'];
-    const rows = sessions.map((s) => [
-      s.id,
-      s.person_name || '',
-      s.member_code || '',
-      s.person_name && s.person_name.startsWith('UNKNOWN_') ? 'UNKNOWN' : 'KNOWN',
-      s.entry_at ? new Date(s.entry_at).toLocaleString('vi-VN') : '',
-      s.exit_at ? new Date(s.exit_at).toLocaleString('vi-VN') : '',
-      s.duration_seconds !== null ? s.duration_seconds : '',
-      s.status,
-    ]);
-    const csvContent = [headers, ...rows].map((r) => r.map((v) => `"${v}"`).join(',')).join('\n');
-    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `libcounterai_sessions_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Đã xuất báo cáo CSV.', 'success');
   };
 
-  const maxHourlyVolume = Math.max(...hourlyStats.map((s) => s.entry + s.exit), 1);
   const filteredLogs = logFilter === 'all' ? logs : logs.filter((l) => l.type === logFilter);
 
   const screenClass = [
@@ -726,7 +995,8 @@ function App() {
         </div>
       </header>
 
-      <AnimatePresence mode="sync" initial={false}>
+      <div className="page-transition-stage">
+      <AnimatePresence mode="wait" initial={false}>
       {activeTab === 'monitor' && (
         <PageTransition key="monitor" className="dashboard-grid page-view" testId="view-monitor">
           <section className="panel">
@@ -737,13 +1007,14 @@ function App() {
 
             <div className="control-group">
               <span className="control-label">Địa chỉ API</span>
-              <input
-                type="text"
-                className="text-input"
-                value={backendUrl}
-                onChange={(e) => setBackendUrl(e.target.value)}
-                disabled={isRunning}
-              />
+                <input
+                  type="text"
+                  className="text-input"
+                  value={backendUrl}
+                  onChange={(e) => setBackendUrl(e.target.value)}
+                  placeholder="http://localhost:8000"
+                  disabled={isRunning}
+                />
             </div>
 
             <div className="control-group">
@@ -761,10 +1032,17 @@ function App() {
               </div>
 
               {cameraSourceTab === 'webcam' && (
-                <button type="button" className="btn btn-block" onClick={startWebcam} disabled={isRunning}>
-                  <Camera {...ICON} />
-                  Bật webcam
-                </button>
+                sourceType === 'webcam' ? (
+                  <button type="button" className="btn btn-block btn-danger" onClick={stopWebcam}>
+                    <Camera {...ICON} />
+                    Tắt webcam
+                  </button>
+                ) : (
+                  <button type="button" className="btn btn-block" onClick={startWebcam} disabled={isRunning}>
+                    <Camera {...ICON} />
+                    Bật webcam
+                  </button>
+                )
               )}
 
               {cameraSourceTab === 'upload' && (
@@ -783,7 +1061,7 @@ function App() {
                   >
                     <UploadSimple size={28} weight="regular" />
                     <div className="file-dropzone-title">Tải video mẫu</div>
-                    <div className="file-dropzone-hint">MP4, WebM, AVI</div>
+                    <div className="file-dropzone-hint">MP4, WebM, AVI · Tối đa 10MB</div>
                   </label>
                 </div>
               )}
@@ -890,9 +1168,10 @@ function App() {
               <span className="screen-scanline" aria-hidden="true" />
               <video
                 ref={videoRef}
-                className={`video-element ${sourceType === 'none' ? 'media-hidden' : ''}`}
+                className={`video-element ${sourceType === 'none' ? 'media-hidden' : ''} ${sourceType === 'webcam' ? 'is-mirrored' : ''}`}
                 playsInline
                 muted
+                autoPlay
               />
               <canvas
                 ref={overlayCanvasRef}
@@ -937,12 +1216,34 @@ function App() {
               )}
             </div>
 
+            {sourceType !== 'none' && (
+              <div className="video-counters video-counters--dock">
+                <div className="video-counter entry">
+                  <div className="video-counter-label">
+                    <ArrowLineDownLeft size={12} weight="bold" />
+                    Lượt vào
+                  </div>
+                  <div className={`video-counter-value ${animateEntry ? 'bump' : ''}`}>{entriesCount}</div>
+                </div>
+                <div className="video-counter exit">
+                  <div className="video-counter-label">
+                    <ArrowLineUpRight size={12} weight="bold" />
+                    Lượt ra
+                  </div>
+                  <div className={`video-counter-value ${animateExit ? 'bump' : ''}`}>{exitsCount}</div>
+                </div>
+              </div>
+            )}
+
             <div className="video-meta">
               <span>
                 Đang theo dõi: <strong>{activeTracksCount}</strong>
               </span>
               <span>
                 Tốc độ xử lý: <strong>{isRunning ? `${fps} FPS` : '0 FPS'}</strong>
+              </span>
+              <span>
+                Latency: <strong>{isRunning ? `${responseLatencyMs} ms` : '0 ms'}</strong>
               </span>
               {!isRunning && sourceType !== 'none' && showLine && (
                 <span className="video-meta-hint">Kéo chuột trên khung hình để vẽ vạch ảo</span>
@@ -987,7 +1288,7 @@ function App() {
 
       {activeTab === 'registry' && (
         <PageTransition key="registry" className="page-stack page-view" testId="view-registry">
-          <section className="panel">
+          <section className="panel registry-form-panel">
             <h2 className="panel-title">
               <UserPlus {...ICON} />
               Đăng ký thành viên
@@ -1021,12 +1322,13 @@ function App() {
                 </div>
               </div>
 
-              <div className="form-grid form-grid-actions">
+              <div className="form-grid form-grid-actions registry-form-actions">
                 <div className="control-group control-group-flush">
                   <span className="control-label">Ảnh chân dung</span>
                   <input type="file" accept="image/*" className="select-input" onChange={(e) => setRegPhoto(e.target.files?.[0] || null)} required />
+                  <span className="field-hint">JPEG, PNG · Tối đa 10MB, tối thiểu 100×100px</span>
                 </div>
-                <button type="submit" className="btn form-submit-btn">
+                <button type="submit" className="btn form-submit-btn register-submit-btn">
                   <UserPlus {...ICON} />
                   Đăng ký
                 </button>
@@ -1078,9 +1380,14 @@ function App() {
                           </span>
                         </td>
                         <td>
-                          <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDeletePerson(p.id)}>
-                            Xóa
-                          </button>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <button type="button" className="btn btn-sm" onClick={() => startEditPerson(p)}>
+                              Sửa
+                            </button>
+                            <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDeletePerson(p.id)}>
+                              Xóa
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -1102,22 +1409,21 @@ function App() {
                 Lịch sử ra/vào
               </h2>
               <div className="toolbar-actions">
-                <input
-                  type="date"
-                  className="text-input text-input-date"
-                  value={filterDate}
-                  onChange={(e) => setFilterDate(e.target.value)}
-                />
-                <button type="button" className="btn btn-sm" onClick={loadFilteredSessions}>
-                  <ArrowsClockwise {...ICON_SM} />
-                  Lọc
-                </button>
-                <button type="button" className="btn btn-sm" data-testid="export-csv" onClick={exportToCSV}>
-                  <DownloadSimple {...ICON_SM} />
-                  Xuất CSV
-                </button>
+                <ExportMenu onExport={handleExport} disabled={loadingHistory} />
               </div>
             </div>
+
+            <PeriodFilter
+              preset={periodPreset}
+              rangeLabel={activeRangeLabel}
+              onPresetChange={applyPeriodPreset}
+              fromDate={draftFrom}
+              toDate={draftTo}
+              onFromChange={setDraftFrom}
+              onToChange={setDraftTo}
+              onApply={applyCustomRange}
+              applying={loadingHistory}
+            />
 
             {loadingHistory ? (
               <SkeletonRows rows={8} />
@@ -1141,7 +1447,7 @@ function App() {
                       <td colSpan={7}>
                         <div className="empty-state">
                           <div className="empty-state-title">Chưa có phiên nào</div>
-                          Dữ liệu sẽ xuất hiện khi có sự kiện ra/vào.
+                          Không có dữ liệu trong khoảng {activeRangeLabel}.
                         </div>
                       </td>
                     </tr>
@@ -1172,6 +1478,28 @@ function App() {
 
       {activeTab === 'analytics' && (
         <PageTransition key="analytics" className="page-stack page-view" testId="view-analytics">
+          <div className="section-toolbar analytics-toolbar">
+            <h2 className="panel-title">
+              <ChartBar {...ICON} />
+              Thống kê lưu lượng
+            </h2>
+            <div className="toolbar-actions">
+              <ExportMenu onExport={handleExport} />
+            </div>
+          </div>
+
+          <PeriodFilter
+            preset={periodPreset}
+            rangeLabel={activeRangeLabel}
+            onPresetChange={applyPeriodPreset}
+            fromDate={draftFrom}
+            toDate={draftTo}
+            onFromChange={setDraftFrom}
+            onToChange={setDraftTo}
+            onApply={applyCustomRange}
+            applying={loadingAnalytics}
+          />
+
           {loadingAnalytics ? (
             <>
               <SkeletonRows rows={3} />
@@ -1185,16 +1513,18 @@ function App() {
               <div className="stat-card-value occupancy">{occupancy.current_occupancy}</div>
             </div>
             <div className="stat-card">
-              <div className="stat-card-label">Lượt vào hôm nay</div>
+              <div className="stat-card-label">Lượt vào</div>
               <div className="stat-card-value entry">{occupancy.total_entries_today}</div>
             </div>
             <div className="stat-card">
-              <div className="stat-card-label">Lượt ra hôm nay</div>
+              <div className="stat-card-label">Lượt ra</div>
               <div className="stat-card-value exit">{occupancy.total_exits_today}</div>
             </div>
           </div>
 
           <div className="stat-card-meta">
+            Khoảng <strong>{activeRangeLabel}</strong>
+            {' · '}
             Đã biết <strong>{occupancy.known_visitors_today}</strong>
             {' · '}
             Khách <strong>{occupancy.unknown_visitors_today}</strong>
@@ -1202,47 +1532,76 @@ function App() {
             Tổng phiên <strong>{occupancy.total_sessions_today}</strong>
           </div>
 
-          <section className="panel">
-            <h2 className="panel-title">
-              <ChartBar {...ICON} />
-              Lưu lượng theo giờ
-            </h2>
-
-            <div className="hourly-chart">
-              {hourlyStats.filter((s) => s.entry > 0 || s.exit > 0).length === 0 ? (
-                <div className="empty-state">Chưa có dữ liệu lưu lượng hôm nay.</div>
-              ) : (
-                hourlyStats.map((s) => {
-                  const entryPct = (s.entry / maxHourlyVolume) * 100;
-                  const exitPct = (s.exit / maxHourlyVolume) * 100;
-                  return (
-                    <div key={s.hour} className="chart-row">
-                      <div className="chart-hour">{s.hour.toString().padStart(2, '0')}:00</div>
-                      <div className="chart-bars-container">
-                        {s.entry > 0 && (
-                          <div className="bar-wrapper">
-                            <div className="bar-fill entry" style={{ ['--bar-pct' as string]: `${entryPct}%` }} />
-                            <span className="bar-val">{s.entry} vào</span>
-                          </div>
-                        )}
-                        {s.exit > 0 && (
-                          <div className="bar-wrapper">
-                            <div className="bar-fill exit" style={{ ['--bar-pct' as string]: `${exitPct}%` }} />
-                            <span className="bar-val">{s.exit} ra</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
+          <section className="panel traffic-panel">
+            <TrafficChart stats={hourlyStats} rangeLabel={activeRangeLabel} />
           </section>
           </>
           )}
         </PageTransition>
       )}
+      {editingPerson && (
+        <div className="modal-overlay" onClick={cancelEditPerson}>
+          <div className="modal-container" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">
+                <Pencil {...ICON} />
+                Cập nhật thành viên
+              </h3>
+              <button type="button" className="modal-close-btn" onClick={cancelEditPerson}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <form onSubmit={handleUpdatePerson} className="form-card" style={{ boxShadow: 'none', padding: 0, border: 0 }}>
+                <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+                  <div className="control-group control-group-flush">
+                    <span className="control-label">Họ và tên</span>
+                    <input type="text" className="text-input" placeholder="Nguyễn Văn A" value={editName} onChange={(e) => setEditName(e.target.value)} required />
+                  </div>
+                  <div className="control-group control-group-flush">
+                    <span className="control-label">Mã thẻ</span>
+                    <input type="text" className="text-input" placeholder="SV123456" value={editCode} onChange={(e) => setEditCode(e.target.value)} required />
+                  </div>
+                  <div className="control-group control-group-flush">
+                    <span className="control-label">Vai trò</span>
+                    <select className="select-input" value={editRole} onChange={(e) => setEditRole(e.target.value)}>
+                      <option value="STUDENT">Sinh viên</option>
+                      <option value="FACULTY">Giảng viên</option>
+                      <option value="STAFF">Nhân viên thư viện</option>
+                      <option value="GUEST">Khách</option>
+                    </select>
+                  </div>
+                  <div className="control-group control-group-flush">
+                    <span className="control-label">Trạng thái</span>
+                    <select className="select-input" value={editStatus} onChange={(e) => setEditStatus(e.target.value)}>
+                      <option value="ACTIVE">Hoạt động</option>
+                      <option value="INACTIVE">Ngưng</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="control-group" style={{ marginBottom: '20px' }}>
+                  <span className="control-label">Ảnh chân dung mới (tùy chọn)</span>
+                  <input type="file" accept="image/*" className="select-input" onChange={(e) => setEditPhoto(e.target.files?.[0] || null)} />
+                  <span className="field-hint">Bỏ trống nếu giữ nguyên ảnh cũ · JPEG, PNG · Tối đa 10MB</span>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                  <button type="button" className="btn btn-ghost" onClick={cancelEditPerson}>
+                    Hủy
+                  </button>
+                  <button type="submit" className="btn form-submit-btn">
+                    <Pencil {...ICON} />
+                    Lưu thay đổi
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
       </AnimatePresence>
+      </div>
     </>
   );
 }

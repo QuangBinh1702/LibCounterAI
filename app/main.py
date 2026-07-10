@@ -1,10 +1,15 @@
 import os
 import time
 import datetime
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, status
+import json
+import logging
+import traceback
+from typing import Optional
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 import cv2
 import numpy as np
 
@@ -13,6 +18,8 @@ from tracker import IoUTracker
 from face_pipeline import FacePipeline
 from database import get_db
 import models
+from offline_queue import enqueue as offline_enqueue, count_pending as offline_count
+import sync_service
 
 app = FastAPI(
     title="LibCounterAI Backend API",
@@ -20,11 +27,12 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Enable CORS for frontend
+# Enable CORS for frontend.
+# allow_credentials=False so wildcard origins are valid in browsers.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -33,10 +41,54 @@ app.add_middleware(
 detector = None
 face_pipeline = None
 session_trackers = {}
+face_template_cache = {"loaded_at": 0.0, "items": []}
+FACE_TEMPLATE_CACHE_TTL_SECONDS = 10.0
+
+
+logger = logging.getLogger("libcounterai")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 def utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+VIETNAM_TZ = datetime.timezone(datetime.timedelta(hours=7), name="Asia/Ho_Chi_Minh")
+
+
+def as_vietnam_time(value: datetime.datetime) -> datetime.datetime:
+    """Normalize a stored UTC timestamp to the local timezone used by reports."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return value.astimezone(VIETNAM_TZ)
+
+
+def local_day_start_as_utc(value: datetime.datetime) -> datetime.datetime:
+    """Convert a Vietnam-local midnight to a UTC-naive DB query boundary."""
+    local_value = value.replace(tzinfo=VIETNAM_TZ)
+    return local_value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def log_info(message: str) -> None:
+    """Log without crashing on Windows consoles that cannot encode Vietnamese."""
+    try:
+        logger.info(message)
+    except UnicodeEncodeError:
+        logger.info(message.encode("ascii", errors="replace").decode("ascii"))
+
+
+def cors_headers(request: Request) -> dict:
+    origin = request.headers.get("origin") or "*"
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "*",
+        "Access-Control-Allow-Headers": "*",
+        "Vary": "Origin",
+    }
 
 
 def elapsed_seconds(start: datetime.datetime, end: datetime.datetime) -> int:
@@ -45,6 +97,153 @@ def elapsed_seconds(start: datetime.datetime, end: datetime.datetime) -> int:
     if end.tzinfo is None:
         end = end.replace(tzinfo=datetime.timezone.utc)
     return int((end - start).total_seconds())
+
+
+def parse_bool(value, default=False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def validate_image_file(file: UploadFile, max_size_mb: int = 10) -> int:
+    MAX_SIZE = max_size_mb * 1024 * 1024
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail=f"Invalid content type: {file.content_type}. Only image files are allowed.")
+    return MAX_SIZE
+
+
+def invalidate_face_template_cache() -> None:
+    face_template_cache["loaded_at"] = 0.0
+    face_template_cache["items"] = []
+
+
+def _queue_event(direction, identity_type, person_id, unknown_id, track_id, camera_id, confidence, metadata, session_event=None, session_data=None):
+    data = {
+        "event_type": direction,
+        "identity_type": identity_type,
+        "person_id": person_id,
+        "unknown_id": unknown_id,
+        "track_id": track_id,
+        "camera_id": camera_id,
+        "confidence": float(confidence),
+        "timestamp": utc_now().isoformat(),
+        "metadata_json": metadata,
+        "session_event": session_event,
+        "visit_session_data": session_data,
+    }
+    offline_enqueue("events", "INSERT", data)
+
+
+def _queue_unknown_identity(now, anonymous_code, embedding, count_today, expire_hours=24):
+    data = {
+        "anonymous_code": anonymous_code,
+        "embedding_vector": embedding,
+        "expire_at": (now + datetime.timedelta(hours=expire_hours)).isoformat(),
+        "status": "ACTIVE",
+        "visit_count": 1,
+        "created_at": now.isoformat(),
+        "last_seen_at": now.isoformat(),
+    }
+    offline_enqueue("unknown_identities", "INSERT", data)
+
+
+def _queue_person(full_name, member_code, role, status_str, embedding, face_score):
+    data = {
+        "full_name": full_name,
+        "member_code": member_code,
+        "role": role,
+        "status": status_str,
+        "face_template": {
+            "embedding_vector": embedding,
+            "quality_score": face_score,
+        },
+    }
+    offline_enqueue("persons", "INSERT", data)
+
+
+
+
+def load_active_face_templates(db: Session, *, force_refresh: bool = False):
+    now = time.monotonic()
+    cache_age = now - float(face_template_cache["loaded_at"])
+    if (
+        not force_refresh
+        and float(face_template_cache["loaded_at"]) > 0
+        and cache_age < FACE_TEMPLATE_CACHE_TTL_SECONDS
+    ):
+        return face_template_cache["items"]
+
+    templates = (
+        db.query(models.FaceTemplate)
+        .options(joinedload(models.FaceTemplate.person))
+        .filter_by(is_active=True)
+        .all()
+    )
+    parsed_templates = []
+    for template in templates:
+        if not template.embedding_vector:
+            continue
+        person_name = (
+            template.person.full_name
+            if template.person is not None
+            else f"person_{template.person_id}"
+        )
+        parsed_templates.append({
+            "person_id": template.person_id,
+            "person_name": person_name,
+            "vector": np.array(template.embedding_vector, dtype=np.float32),
+        })
+
+    face_template_cache["loaded_at"] = now
+    face_template_cache["items"] = parsed_templates
+    return parsed_templates
+
+
+def identity_from_visit_session(session: models.VisitSession):
+    if session.identity_type == "KNOWN" and session.person_id is not None:
+        return {
+            "identity_type": "KNOWN",
+            "person_id": session.person_id,
+            "unknown_id": None,
+            "person_name": session.person.full_name if session.person else f"person_{session.person_id}",
+        }
+    if session.identity_type == "UNKNOWN" and session.unknown_id is not None:
+        return {
+            "identity_type": "UNKNOWN",
+            "person_id": None,
+            "unknown_id": session.unknown_id,
+            "person_name": (
+                session.unknown_identity.anonymous_code
+                if session.unknown_identity
+                else f"UNKNOWN_{session.unknown_id}"
+            ),
+        }
+    return None
+
+
+def infer_exit_identity_from_active_sessions(db: Session):
+    active_sessions = (
+        db.query(models.VisitSession)
+        .filter_by(status="ACTIVE")
+        .order_by(models.VisitSession.entry_at.desc())
+        .all()
+    )
+    if len(active_sessions) != 1:
+        return None, len(active_sessions)
+
+    identity = identity_from_visit_session(active_sessions[0])
+    if identity is None:
+        return None, len(active_sessions)
+    identity["visit_session_id"] = active_sessions[0].id
+    return identity, len(active_sessions)
 
 @app.on_event("startup")
 def load_models():
@@ -56,339 +255,438 @@ def load_models():
     # Initialize Face Pipeline
     face_pipeline = FacePipeline()
     print("FacePipeline ONNX Models loaded successfully.")
+    sync_service.start()
+    print("Offline sync service started.")
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Ensure browsers always see CORS headers, even on unexpected 500s.
+    log_info(f"Unhandled error on {request.url.path}: {exc}")
+    log_info(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal_server_error", "detail": str(exc)},
+        headers=cors_headers(request),
+    )
+
 
 @app.get("/api/health")
-async def health_check():
-    # Simple check for database/redis environment configuration
+async def health_check(db: Session = Depends(get_db)):
     db_host = os.getenv("POSTGRES_HOST", "localhost")
     redis_host = os.getenv("REDIS_HOST", "localhost")
-    
-    # In a full implementation, we would ping the services here.
-    # For initial skeleton, we return configuration presence.
+
+    database_status = "configured"
+    try:
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+        database_status = "up"
+    except Exception as exc:
+        database_status = f"down: {exc.__class__.__name__}"
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "timestamp": time.time(),
+                "services": {
+                    "database": f"{database_status} at {db_host}",
+                    "cache": f"configured at {redis_host}",
+                },
+                "hint": "PostgreSQL is not reachable. Start it with: npm run db:up",
+            },
+        )
+
     return {
         "status": "healthy",
         "timestamp": time.time(),
         "services": {
-            "database": f"configured at {db_host}",
-            "cache": f"configured at {redis_host}"
-        }
+            "database": f"{database_status} at {db_host}",
+            "cache": f"configured at {redis_host}",
+        },
     }
 
 @app.post("/api/process-frame")
 async def process_frame(
+    request: Request,
     file: UploadFile = File(...),
     session_id: str = Form("default"),
     line_config: str = Form(None),
     mock_detections: str = Form(None),
+    fast_mode: str = Form("false"),
+    identity_probe: str = Form("false"),
+    detect_frame: str = Form("true"),
+    identity_ttl_seconds: str = Form("5"),
     db: Session = Depends(get_db)
 ):
-    if detector is None:
-        return {"error": "Detector not loaded yet"}
-        
-    # Read image from file
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    if img is None:
-        return {"error": "Invalid image file"}
-        
-    # Get or create tracker for session
-    if session_id not in session_trackers:
-        session_trackers[session_id] = IoUTracker()
-    tracker = session_trackers[session_id]
-    
-    # Parse line config if provided
-    parsed_line_config = None
-    if line_config:
-        try:
-            import json
-            parsed_line_config = json.loads(line_config)
-        except Exception as e:
-            print(f"Error parsing line_config: {e}")
-            
-    # Parse mock detections if provided (for testing and validation)
-    detections = None
-    if mock_detections:
-        try:
-            import json
-            detections = json.loads(mock_detections)
-        except Exception as e:
-            print(f"Error parsing mock_detections: {e}")
-            
-    if detections is None:
-        # Run YOLO detection
-        detections = detector.detect(img)
-    
-    print(f"[API] Processing frame: detections={detections}, line_config={parsed_line_config}")
-    
-    # Run tracking update with line crossing detection
-    tracks, crossing_events = tracker.update(detections, parsed_line_config)
-    
-    # Run face recognition on tracks that do not have a KNOWN identity
-    if tracks:
-        templates = db.query(models.FaceTemplate).filter_by(is_active=True).all()
-        # Pre-cache template vectors as numpy arrays for speed
-        parsed_templates = []
-        for t in templates:
-            if t.embedding_vector:
-                parsed_templates.append({
-                    "person_id": t.person_id,
-                    "person_name": t.person.full_name,
-                    "vector": np.array(t.embedding_vector, dtype=np.float32)
-                })
-                
+    request_start = time.perf_counter()
+    try:
+        if detector is None or face_pipeline is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Detector not loaded yet"},
+                headers=cors_headers(request),
+            )
+
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Invalid image file"},
+                headers=cors_headers(request),
+            )
+
+        if session_id not in session_trackers:
+            session_trackers[session_id] = IoUTracker()
+        tracker = session_trackers[session_id]
+
+        parsed_line_config = None
+        if line_config:
+            try:
+                parsed_line_config = json.loads(line_config)
+            except Exception as e:
+                log_info(f"Error parsing line_config: {e}")
+
+        fast_mode_enabled = parse_bool(fast_mode)
+        identity_probe_enabled = parse_bool(identity_probe)
+        detect_frame_enabled = parse_bool(detect_frame, True)
+        identity_ttl = max(1.0, parse_float(identity_ttl_seconds, 5.0))
+
+        detections = None
+        detector_ran = False
+        if mock_detections:
+            try:
+                detections = json.loads(mock_detections)
+                detector_ran = True
+            except Exception as e:
+                log_info(f"Error parsing mock_detections: {e}")
+
+        if detections is None:
+            if detect_frame_enabled:
+                detections = detector.detect(img)
+                detector_ran = True
+            else:
+                detections = []
+
+        tracks, crossing_events = tracker.update(detections, parsed_line_config)
+        crossing_track_ids = {event["track_id"] for event in crossing_events}
+        now_monotonic = time.monotonic()
         for track in tracks:
             track_id = track["track_id"]
-            
-            # If already identified as KNOWN, skip face detection/matching
-            if track_id in tracker.identities and tracker.identities[track_id]["identity_type"] == "KNOWN":
-                # Update track dictionary with identity
-                track.update(tracker.identities[track_id])
-                continue
-                
-            # Otherwise, try to detect and match
-            x1, y1, x2, y2 = [int(coord) for coord in track["bbox"]]
-            
-            # Bound coordinates to image dimensions
-            h_img, w_img = img.shape[:2]
-            x1 = max(0, min(x1, w_img - 1))
-            y1 = max(0, min(y1, h_img - 1))
-            x2 = max(0, min(x2, w_img - 1))
-            y2 = max(0, min(y2, h_img - 1))
-            
-            if x2 > x1 and y2 > y1:
+            identity = tracker.identities.get(track_id)
+            if identity and now_monotonic - float(identity.get("identified_at", 0.0)) > identity_ttl:
+                del tracker.identities[track_id]
+
+        tracks_to_identify = [
+            track
+            for track in tracks
+            if track["track_id"] not in tracker.identities
+            and not track.get("predicted", False)
+            and (
+                not fast_mode_enabled
+                or identity_probe_enabled
+                or track["track_id"] in crossing_track_ids
+            )
+        ]
+
+        if tracks_to_identify:
+            parsed_templates = load_active_face_templates(db)
+
+            for track in tracks_to_identify:
+                track_id = track["track_id"]
+
+                x1, y1, x2, y2 = [int(coord) for coord in track["bbox"]]
+                h_img, w_img = img.shape[:2]
+                x1 = max(0, min(x1, w_img - 1))
+                y1 = max(0, min(y1, h_img - 1))
+                x2 = max(0, min(x2, w_img - 1))
+                y2 = max(0, min(y2, h_img - 1))
+
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
                 person_crop = img[y1:y2, x1:x2]
                 try:
-                    # Detect faces in crop (lower threshold slightly for smaller crops)
                     faces = face_pipeline.detect_faces(person_crop, score_threshold=0.5)
-                    if faces:
-                        # Use the face with the highest score
-                        faces.sort(key=lambda x: x["score"], reverse=True)
-                        face = faces[0]
-                        
-                        # Extract embedding
-                        embedding = face_pipeline.extract_embedding(person_crop, face["raw_face"])
-                        emb_arr = np.array(embedding, dtype=np.float32)
-                        
-                        # Find best match using cosine similarity
-                        best_sim = -1.0
-                        best_match = None
-                        
-                        for pt in parsed_templates:
-                            dot = np.dot(emb_arr, pt["vector"])
-                            norm_a = np.linalg.norm(emb_arr)
-                            norm_b = np.linalg.norm(pt["vector"])
-                            if norm_a > 1e-6 and norm_b > 1e-6:
-                                sim = dot / (norm_a * norm_b)
-                                if sim > best_sim:
-                                    best_sim = sim
-                                    best_match = pt
-                                    
-                        # Threshold is 0.6
-                        if best_sim >= 0.6 and best_match is not None:
-                            identity = {
-                                "person_id": best_match["person_id"],
-                                "person_name": best_match["person_name"],
-                                "identity_type": "KNOWN",
-                                "similarity_score": float(best_sim)
-                            }
-                            tracker.identities[track_id] = identity
-                            track.update(identity)
-                        else:
-                            # Not matched, check against unknown_identities (E03 Re-ID)
-                            now = datetime.datetime.utcnow()
-                            active_unknowns = db.query(models.UnknownIdentity).filter(
-                                models.UnknownIdentity.status == "ACTIVE",
-                                models.UnknownIdentity.expire_at > now
-                            ).all()
-                            
-                            best_unk_sim = -1.0
-                            best_unk_match = None
-                            for unk in active_unknowns:
-                                # unk.embedding_vector is a list/vector
-                                unk_vec = np.array(unk.embedding_vector, dtype=np.float32)
-                                dot = np.dot(emb_arr, unk_vec)
-                                norm_a = np.linalg.norm(emb_arr)
-                                norm_b = np.linalg.norm(unk_vec)
-                                if norm_a > 1e-6 and norm_b > 1e-6:
-                                    sim = dot / (norm_a * norm_b)
-                                    if sim > best_unk_sim:
-                                        best_unk_sim = sim
-                                        best_unk_match = unk
-                            
-                            # Unknown similarity threshold is 0.55
-                            if best_unk_sim >= 0.55 and best_unk_match is not None:
-                                best_unk_match.last_seen_at = now
-                                best_unk_match.visit_count += 1
-                                db.commit()
-                                
-                                identity = {
-                                    "person_id": None,
-                                    "unknown_id": best_unk_match.id,
-                                    "person_name": best_unk_match.anonymous_code,
-                                    "identity_type": "UNKNOWN",
-                                    "similarity_score": float(best_unk_sim)
-                                }
-                                tracker.identities[track_id] = identity
-                                track.update(identity)
-                            else:
-                                # Create a new UnknownIdentity with code UNKNOWN_YYYYMMDD_XXXX
-                                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                                today_end = today_start + datetime.timedelta(days=1)
-                                count_today = db.query(models.UnknownIdentity).filter(
-                                    models.UnknownIdentity.created_at >= today_start,
-                                    models.UnknownIdentity.created_at < today_end
-                                ).count()
-                                seq = count_today + 1
-                                date_str = now.strftime("%Y%m%d")
-                                anonymous_code = f"UNKNOWN_{date_str}_{seq:04d}"
-                                
-                                new_unk = models.UnknownIdentity(
-                                    anonymous_code=anonymous_code,
-                                    embedding_vector=embedding,
-                                    expire_at=now + datetime.timedelta(hours=24),
-                                    status="ACTIVE",
-                                    visit_count=1,
-                                    created_at=now,
-                                    last_seen_at=now
-                                )
-                                db.add(new_unk)
-                                db.flush()
-                                db.commit()
-                                
-                                identity = {
-                                    "person_id": None,
-                                    "unknown_id": new_unk.id,
-                                    "person_name": anonymous_code,
-                                    "identity_type": "UNKNOWN",
-                                    "similarity_score": float(best_sim) if best_sim > -1.0 else 0.0
-                                }
-                                tracker.identities[track_id] = identity
-                                track.update(identity)
-                except Exception as ex:
-                    print(f"Error during face matching for track {track_id}: {ex}")
+                    if not faces:
+                        continue
 
-    # For each crossing event, link it with identified details and write to DB
-    for event in crossing_events:
-        track_id = event["track_id"]
-        direction = event["direction"] # ENTRY or EXIT
-        
-        # Look up identity
-        identity_type = "UNKNOWN"
-        person_id = None
-        unknown_id = None
-        confidence = 0.9
-        
-        if track_id in tracker.identities:
-            id_data = tracker.identities[track_id]
-            if id_data["identity_type"] == "KNOWN":
-                identity_type = "KNOWN"
-                person_id = id_data["person_id"]
-                confidence = id_data.get("similarity_score", 0.9)
-            elif id_data["identity_type"] == "UNKNOWN":
-                identity_type = "UNKNOWN"
-                unknown_id = id_data.get("unknown_id")
-                confidence = id_data.get("similarity_score", 0.9)
-                
-        # Write Event and VisitSession to DB
-        try:
-            camera = db.query(models.Camera).first()
-            if not camera:
-                camera = models.Camera(
-                    name="Default Camera",
-                    source_type="WEBCAM",
-                    source_url="0",
-                    status="ONLINE"
+                    faces.sort(key=lambda item: item["score"], reverse=True)
+                    face = faces[0]
+                    embedding = face_pipeline.extract_embedding(person_crop, face["raw_face"])
+                    emb_arr = np.array(embedding, dtype=np.float32)
+
+                    best_sim = -1.0
+                    best_match = None
+                    for pt in parsed_templates:
+                        norm_a = np.linalg.norm(emb_arr)
+                        norm_b = np.linalg.norm(pt["vector"])
+                        if norm_a <= 1e-6 or norm_b <= 1e-6:
+                            continue
+                        sim = float(np.dot(emb_arr, pt["vector"]) / (norm_a * norm_b))
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_match = pt
+
+                    if best_sim >= 0.6 and best_match is not None:
+                        identity = {
+                            "person_id": best_match["person_id"],
+                            "person_name": best_match["person_name"],
+                            "identity_type": "KNOWN",
+                            "similarity_score": float(best_sim),
+                            "identified_at": now_monotonic,
+                        }
+                        tracker.identities[track_id] = identity
+                        track.update(identity)
+                        continue
+
+                    now = utc_now()
+                    active_unknowns = db.query(models.UnknownIdentity).filter(
+                        models.UnknownIdentity.status == "ACTIVE",
+                        models.UnknownIdentity.expire_at > now,
+                    ).all()
+
+                    best_unk_sim = -1.0
+                    best_unk_match = None
+                    for unk in active_unknowns:
+                        unk_vec = np.array(unk.embedding_vector, dtype=np.float32)
+                        norm_a = np.linalg.norm(emb_arr)
+                        norm_b = np.linalg.norm(unk_vec)
+                        if norm_a <= 1e-6 or norm_b <= 1e-6:
+                            continue
+                        sim = float(np.dot(emb_arr, unk_vec) / (norm_a * norm_b))
+                        if sim > best_unk_sim:
+                            best_unk_sim = sim
+                            best_unk_match = unk
+
+                    if best_unk_sim >= 0.55 and best_unk_match is not None:
+                        best_unk_match.last_seen_at = now
+                        best_unk_match.visit_count += 1
+                        db.commit()
+                        identity = {
+                            "person_id": None,
+                            "unknown_id": best_unk_match.id,
+                            "person_name": best_unk_match.anonymous_code,
+                            "identity_type": "UNKNOWN",
+                            "similarity_score": float(best_unk_sim),
+                            "identified_at": now_monotonic,
+                        }
+                        tracker.identities[track_id] = identity
+                        track.update(identity)
+                        continue
+
+                    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    today_end = today_start + datetime.timedelta(days=1)
+                    count_today = db.query(models.UnknownIdentity).filter(
+                        models.UnknownIdentity.created_at >= today_start,
+                        models.UnknownIdentity.created_at < today_end,
+                    ).count()
+                    anonymous_code = f"UNKNOWN_{now.strftime('%Y%m%d')}_{count_today + 1:04d}"
+
+                    new_unk = models.UnknownIdentity(
+                        anonymous_code=anonymous_code,
+                        embedding_vector=embedding,
+                        expire_at=now + datetime.timedelta(hours=24),
+                        status="ACTIVE",
+                        visit_count=1,
+                        created_at=now,
+                        last_seen_at=now,
+                    )
+                    try:
+                        db.add(new_unk)
+                        db.flush()
+                        db.commit()
+                    except Exception as unk_db_ex:
+                        log_info(f"DB error saving unknown identity (queued offline): {unk_db_ex}")
+                        _queue_unknown_identity(now, anonymous_code, embedding, count_today, expire_hours=24)
+
+                    identity = {
+                        "person_id": None,
+                        "unknown_id": new_unk.id,
+                        "person_name": anonymous_code,
+                        "identity_type": "UNKNOWN",
+                        "similarity_score": float(best_sim) if best_sim > -1.0 else 0.0,
+                        "identified_at": now_monotonic,
+                    }
+                    tracker.identities[track_id] = identity
+                    track.update(identity)
+                except Exception as ex:
+                    log_info(f"Error during face matching for track {track_id}: {ex}")
+
+        for track in tracks:
+            identity = tracker.identities.get(track["track_id"])
+            if identity:
+                track.update(identity)
+
+        for event in crossing_events:
+            track_id = event["track_id"]
+            direction = event["direction"]
+
+            identity_type = "UNKNOWN"
+            person_id = None
+            unknown_id = None
+            confidence = 0.9
+            person_name = "Khách"
+            metadata = {"resolution": "face_or_track_identity"}
+
+            if track_id in tracker.identities:
+                id_data = tracker.identities[track_id]
+                if id_data["identity_type"] == "KNOWN":
+                    identity_type = "KNOWN"
+                    person_id = id_data["person_id"]
+                    confidence = id_data.get("similarity_score", 0.9)
+                elif id_data["identity_type"] == "UNKNOWN":
+                    identity_type = "UNKNOWN"
+                    unknown_id = id_data.get("unknown_id")
+                    confidence = id_data.get("similarity_score", 0.9)
+                person_name = id_data.get("person_name") or person_name
+            else:
+                event["identity_type"] = identity_type
+                event["person_name"] = "Khách"
+                event["similarity_score"] = float(confidence)
+
+            if track_id not in tracker.identities and direction == "EXIT":
+                inferred_identity, active_count = infer_exit_identity_from_active_sessions(db)
+                metadata = {
+                    "resolution": "session_continuity" if inferred_identity else "unresolved_exit",
+                    "active_session_candidates": active_count,
+                }
+                if inferred_identity:
+                    identity_type = inferred_identity["identity_type"]
+                    person_id = inferred_identity["person_id"]
+                    unknown_id = inferred_identity["unknown_id"]
+                    person_name = inferred_identity["person_name"]
+                    confidence = 0.45
+                    metadata["visit_session_id"] = inferred_identity["visit_session_id"]
+                else:
+                    identity_type = "UNRESOLVED"
+                    person_name = "Chưa xác định"
+                    confidence = 0.0
+
+            event["identity_type"] = identity_type
+            event["person_name"] = person_name
+            event["similarity_score"] = float(confidence)
+            event["identity_resolution"] = metadata["resolution"]
+
+            try:
+                camera = db.query(models.Camera).first()
+                if not camera:
+                    camera = models.Camera(
+                        name="Default Camera",
+                        source_type="WEBCAM",
+                        source_url="0",
+                        status="ONLINE",
+                    )
+                    db.add(camera)
+                    db.flush()
+
+                db_event = models.Event(
+                    event_type=direction,
+                    identity_type=identity_type,
+                    person_id=person_id,
+                    unknown_id=unknown_id,
+                    track_id=track_id,
+                    camera_id=camera.id,
+                    confidence=float(confidence),
+                    timestamp=utc_now(),
+                    metadata_json=metadata,
                 )
-                db.add(camera)
+                db.add(db_event)
                 db.flush()
-                
-            db_event = models.Event(
-                event_type=direction,
-                identity_type=identity_type,
-                person_id=person_id,
-                unknown_id=unknown_id,
-                track_id=track_id,
-                camera_id=camera.id,
-                confidence=float(confidence),
-                timestamp=utc_now()
-            )
-            db.add(db_event)
-            db.flush()
-            
-            if identity_type == "KNOWN" and person_id is not None:
-                if direction == "ENTRY":
-                    # Check if active session exists for this person
-                    active_sess = db.query(models.VisitSession).filter_by(
-                        person_id=person_id,
-                        status="ACTIVE"
-                    ).first()
-                    if not active_sess:
-                        new_sess = models.VisitSession(
-                            identity_type="KNOWN",
+
+                if identity_type == "KNOWN" and person_id is not None:
+                    if direction == "ENTRY":
+                        active_sess = db.query(models.VisitSession).filter_by(
                             person_id=person_id,
-                            entry_camera_id=camera.id,
-                            entry_event_id=db_event.id,
-                            entry_at=utc_now(),
-                            status="ACTIVE"
-                        )
-                        db.add(new_sess)
-                elif direction == "EXIT":
-                    # Find active session
-                    active_sess = db.query(models.VisitSession).filter_by(
-                        person_id=person_id,
-                        status="ACTIVE"
-                    ).first()
-                    if active_sess:
-                        active_sess.exit_camera_id = camera.id
-                        active_sess.exit_event_id = db_event.id
-                        active_sess.exit_at = utc_now()
-                        active_sess.status = "CLOSED"
-                        active_sess.duration_seconds = elapsed_seconds(active_sess.entry_at, active_sess.exit_at)
-            elif identity_type == "UNKNOWN" and unknown_id is not None:
-                if direction == "ENTRY":
-                    # Check if active session exists for this unknown visitor
-                    active_sess = db.query(models.VisitSession).filter_by(
-                        unknown_id=unknown_id,
-                        status="ACTIVE"
-                    ).first()
-                    if not active_sess:
-                        new_sess = models.VisitSession(
-                            identity_type="UNKNOWN",
+                            status="ACTIVE",
+                        ).first()
+                        if not active_sess:
+                            db.add(models.VisitSession(
+                                identity_type="KNOWN",
+                                person_id=person_id,
+                                entry_camera_id=camera.id,
+                                entry_event_id=db_event.id,
+                                entry_at=utc_now(),
+                                status="ACTIVE",
+                            ))
+                    elif direction == "EXIT":
+                        active_sess = db.query(models.VisitSession).filter_by(
+                            person_id=person_id,
+                            status="ACTIVE",
+                        ).first()
+                        if active_sess:
+                            active_sess.exit_camera_id = camera.id
+                            active_sess.exit_event_id = db_event.id
+                            active_sess.exit_at = utc_now()
+                            active_sess.status = "CLOSED"
+                            active_sess.duration_seconds = elapsed_seconds(active_sess.entry_at, active_sess.exit_at)
+                elif identity_type == "UNKNOWN" and unknown_id is not None:
+                    if direction == "ENTRY":
+                        active_sess = db.query(models.VisitSession).filter_by(
                             unknown_id=unknown_id,
-                            entry_camera_id=camera.id,
-                            entry_event_id=db_event.id,
-                            entry_at=utc_now(),
-                            status="ACTIVE"
-                        )
-                        db.add(new_sess)
-                elif direction == "EXIT":
-                    # Find active session
-                    active_sess = db.query(models.VisitSession).filter_by(
-                        unknown_id=unknown_id,
-                        status="ACTIVE"
-                    ).first()
-                    if active_sess:
-                        active_sess.exit_camera_id = camera.id
-                        active_sess.exit_event_id = db_event.id
-                        active_sess.exit_at = utc_now()
-                        active_sess.status = "CLOSED"
-                        active_sess.duration_seconds = elapsed_seconds(active_sess.entry_at, active_sess.exit_at)
-            
-            db.commit()
-            print(f"[DB Log] Event logged: {direction} for track {track_id} ({identity_type})")
-        except Exception as ex:
-            db.rollback()
-            print(f"Error logging crossing event: {ex}")
-            
-    print(f"[API] Frame processed: tracks={tracks}, crossing_events={crossing_events}")
-    
-    return {
-        "session_id": session_id,
-        "tracks": tracks,
-        "crossing_events": crossing_events
-    }
+                            status="ACTIVE",
+                        ).first()
+                        if not active_sess:
+                            db.add(models.VisitSession(
+                                identity_type="UNKNOWN",
+                                unknown_id=unknown_id,
+                                entry_camera_id=camera.id,
+                                entry_event_id=db_event.id,
+                                entry_at=utc_now(),
+                                status="ACTIVE",
+                            ))
+                    elif direction == "EXIT":
+                        active_sess = db.query(models.VisitSession).filter_by(
+                            unknown_id=unknown_id,
+                            status="ACTIVE",
+                        ).first()
+                        if active_sess:
+                            active_sess.exit_camera_id = camera.id
+                            active_sess.exit_event_id = db_event.id
+                            active_sess.exit_at = utc_now()
+                            active_sess.status = "CLOSED"
+                            active_sess.duration_seconds = elapsed_seconds(active_sess.entry_at, active_sess.exit_at)
+
+                db.commit()
+                log_info(f"[DB Log] Event logged: {direction} for track {track_id} ({identity_type})")
+            except Exception as ex:
+                db.rollback()
+                log_info(f"Error logging crossing event: {ex}")
+                _camera = locals().get("camera")
+                _cam_id = _camera.id if _camera is not None else None
+                _queue_event(
+                    direction, identity_type, person_id, unknown_id,
+                    track_id, _cam_id, confidence, metadata
+                )
+
+        processing_ms = round((time.perf_counter() - request_start) * 1000, 1)
+        return {
+            "session_id": session_id,
+            "tracks": tracks,
+            "crossing_events": crossing_events,
+            "processing_ms": processing_ms,
+            "fast_mode": fast_mode_enabled,
+            "identity_probe": identity_probe_enabled,
+            "detect_frame": detect_frame_enabled,
+            "detector_ran": detector_ran,
+        }
+    except Exception as ex:
+        db.rollback()
+        log_info(f"process-frame failed: {ex}")
+        log_info(traceback.format_exc())
+        detail = str(ex)
+        hint = None
+        if "connection" in detail.lower() and ("5432" in detail or "postgres" in detail.lower() or "OperationalError" in detail):
+            hint = "PostgreSQL is not reachable. Run: npm run db:up"
+        payload = {"error": "process_frame_failed", "detail": detail}
+        if hint:
+            payload["hint"] = hint
+        return JSONResponse(
+            status_code=503 if hint else 500,
+            content=payload,
+            headers=cors_headers(request),
+        )
+
 
 @app.post("/api/persons/register", status_code=status.HTTP_201_CREATED)
 async def register_person(
@@ -471,6 +769,7 @@ async def register_person(
         )
         db.add(new_face)
         db.commit()
+        invalidate_face_template_cache()
         db.refresh(new_person)
         
         return {
@@ -487,10 +786,9 @@ async def register_person(
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database transaction failed: {str(e)}"
-        )
+        log_info(f"Database transaction failed (queued offline): {e}")
+        _queue_person(full_name, member_code, role, status_str, embedding, float(faces[0]["score"]))
+        return {"message": "Person queued for registration (database unavailable)", "queued": True}
 
 @app.get("/api/persons")
 async def get_persons(db: Session = Depends(get_db)):
@@ -521,7 +819,113 @@ async def delete_person(person_id: int, db: Session = Depends(get_db)):
         
         db.delete(person)
         db.commit()
+        invalidate_face_template_cache()
         return {"message": "Person deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/persons/{person_id}")
+async def update_person(
+    person_id: int,
+    full_name: str = Form(...),
+    member_code: str = Form(...),
+    role: str = Form(...),
+    status_str: str = Form("ACTIVE", alias="status"),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db)
+):
+    person = db.query(models.Person).filter_by(id=person_id).first()
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+        
+    # Check duplicate member_code (excluding self)
+    db_person = db.query(models.Person).filter(
+        models.Person.member_code == member_code,
+        models.Person.id != person_id
+    ).first()
+    if db_person:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Member code {member_code} is already registered."
+        )
+
+    # Update basic details
+    person.full_name = full_name
+    person.member_code = member_code
+    person.role = role
+    person.status = status_str
+
+    # Optional image upload for updating template
+    if file is not None and file.filename:
+        try:
+            contents = await file.read()
+            nparr = np.frombuffer(contents, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("Decoded image is None")
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid image file: {str(e)}"
+            )
+            
+        try:
+            faces = face_pipeline.detect_faces(img)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error executing face detection: {str(e)}"
+            )
+            
+        if len(faces) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No face detected in the uploaded photo."
+            )
+        if len(faces) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Multiple faces detected in the uploaded photo. Please upload a portrait with exactly one face."
+            )
+            
+        try:
+            embedding = face_pipeline.extract_embedding(img, faces[0]["raw_face"])
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error extracting face embedding: {str(e)}"
+            )
+            
+        try:
+            # Delete old templates first, or update the existing active template
+            db.query(models.FaceTemplate).filter_by(person_id=person_id).delete()
+            
+            new_face = models.FaceTemplate(
+                person_id=person.id,
+                embedding_vector=embedding,
+                model_name="sface",
+                model_version="2021dec",
+                quality_score=float(faces[0]["score"]),
+                source_type="UPLOAD",
+                is_active=True
+            )
+            db.add(new_face)
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Database error saving face template: {str(e)}")
+
+    try:
+        db.commit()
+        invalidate_face_template_cache()
+        db.refresh(person)
+        return {
+            "id": person.id,
+            "full_name": person.full_name,
+            "member_code": person.member_code,
+            "role": person.role,
+            "status": person.status
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -539,6 +943,8 @@ async def get_events(db: Session = Depends(get_db)):
         elif e.identity_type == "UNKNOWN" and e.unknown_identity:
             name = e.unknown_identity.anonymous_code
             code = None
+        elif e.identity_type == "UNRESOLVED":
+            name = "Chưa xác định"
             
         result.append({
             "id": e.id,
@@ -551,23 +957,51 @@ async def get_events(db: Session = Depends(get_db)):
         })
     return result
 
+def parse_day_start(value: str | None) -> datetime.datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.datetime.strptime(value, "%Y-%m-%d").replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    except ValueError:
+        return None
+
+
+def resolve_report_window(
+    date: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> tuple[datetime.datetime, datetime.datetime]:
+    """Resolve local Vietnam dates into UTC-naive [start, end) DB boundaries."""
+    today_local = datetime.datetime.now(VIETNAM_TZ).replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+    )
+    start_local = parse_day_start(from_date) or parse_day_start(date) or today_local
+    end_local = parse_day_start(to_date) or parse_day_start(date) or start_local
+    if end_local < start_local:
+        start_local, end_local = end_local, start_local
+    end_local += datetime.timedelta(days=1)
+    return local_day_start_as_utc(start_local), local_day_start_as_utc(end_local)
+
+
 @app.get("/api/sessions")
-async def get_sessions(db: Session = Depends(get_db), date: str = None):
+async def get_sessions(
+    db: Session = Depends(get_db),
+    date: str = None,
+    from_date: str = None,
+    to_date: str = None,
+):
     query = db.query(models.VisitSession)
-    
-    # E04: Optional date filter (format: YYYY-MM-DD)
-    if date:
-        try:
-            filter_date = datetime.datetime.strptime(date, "%Y-%m-%d")
-            day_start = filter_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            day_end = day_start + datetime.timedelta(days=1)
-            query = query.filter(
-                models.VisitSession.entry_at >= day_start,
-                models.VisitSession.entry_at < day_end
-            )
-        except ValueError:
-            pass  # If date format is invalid, return all sessions
-    
+
+    # Prefer explicit range; keep legacy `date=` for single-day filters.
+    if from_date or to_date or date:
+        day_start, day_end = resolve_report_window(date=date, from_date=from_date, to_date=to_date)
+        query = query.filter(
+            models.VisitSession.entry_at >= day_start,
+            models.VisitSession.entry_at < day_end,
+        )
+
     sessions = query.order_by(models.VisitSession.entry_at.desc()).all()
     result = []
     for s in sessions:
@@ -579,7 +1013,7 @@ async def get_sessions(db: Session = Depends(get_db), date: str = None):
         elif s.identity_type == "UNKNOWN" and s.unknown_identity:
             name = s.unknown_identity.anonymous_code
             code = None
-            
+
         result.append({
             "id": s.id,
             "person_name": name,
@@ -593,60 +1027,97 @@ async def get_sessions(db: Session = Depends(get_db), date: str = None):
     return result
 
 @app.get("/api/stats/occupancy")
-async def get_occupancy(db: Session = Depends(get_db)):
-    today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    
+async def get_occupancy(
+    db: Session = Depends(get_db),
+    date: str = None,
+    from_date: str = None,
+    to_date: str = None,
+):
+    range_start, range_end = resolve_report_window(date=date, from_date=from_date, to_date=to_date)
+
     entries = db.query(models.Event).filter(
         models.Event.event_type == "ENTRY",
-        models.Event.timestamp >= today_start
+        models.Event.timestamp >= range_start,
+        models.Event.timestamp < range_end,
     ).count()
-    
+
     exits = db.query(models.Event).filter(
         models.Event.event_type == "EXIT",
-        models.Event.timestamp >= today_start
+        models.Event.timestamp >= range_start,
+        models.Event.timestamp < range_end,
     ).count()
-    
-    active_sessions = db.query(models.VisitSession).filter_by(status="ACTIVE").count()
-    
-    # E04: Known vs Unknown breakdown
+
+    # Auto-close stale sessions from before the selected period.
+    # Sessions still ACTIVE whose entry_at is before range_start are likely
+    # leftover from previous days where the person never properly exited.
+    stale_sessions = db.query(models.VisitSession).filter(
+        models.VisitSession.status == "ACTIVE",
+        models.VisitSession.entry_at < range_start,
+    ).all()
+    for stale in stale_sessions:
+        stale.status = "CLOSED"
+        stale.exit_at = stale.entry_at  # no real exit observed
+        stale.duration_seconds = 0
+    if stale_sessions:
+        db.commit()
+
+    active_sessions = db.query(models.VisitSession).filter(
+        models.VisitSession.status == "ACTIVE",
+        models.VisitSession.entry_at >= range_start,
+        models.VisitSession.entry_at < range_end,
+    ).count()
+
     known_entries = db.query(models.Event).filter(
         models.Event.event_type == "ENTRY",
         models.Event.identity_type == "KNOWN",
-        models.Event.timestamp >= today_start
+        models.Event.timestamp >= range_start,
+        models.Event.timestamp < range_end,
     ).count()
-    
+
     unknown_entries = db.query(models.Event).filter(
         models.Event.event_type == "ENTRY",
         models.Event.identity_type == "UNKNOWN",
-        models.Event.timestamp >= today_start
+        models.Event.timestamp >= range_start,
+        models.Event.timestamp < range_end,
     ).count()
-    
+
     total_sessions = db.query(models.VisitSession).filter(
-        models.VisitSession.entry_at >= today_start
+        models.VisitSession.entry_at >= range_start,
+        models.VisitSession.entry_at < range_end,
     ).count()
-    
+
     return {
         "current_occupancy": active_sessions,
         "total_entries_today": entries,
         "total_exits_today": exits,
         "known_visitors_today": known_entries,
         "unknown_visitors_today": unknown_entries,
-        "total_sessions_today": total_sessions
+        "total_sessions_today": total_sessions,
+        "from_date": range_start.date().isoformat(),
+        "to_date": (range_end - datetime.timedelta(days=1)).date().isoformat(),
     }
 
 @app.get("/api/stats/hourly")
-async def get_hourly_stats(db: Session = Depends(get_db)):
-    today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    events = db.query(models.Event).filter(models.Event.timestamp >= today_start).all()
-    
+async def get_hourly_stats(
+    db: Session = Depends(get_db),
+    date: str = None,
+    from_date: str = None,
+    to_date: str = None,
+):
+    range_start, range_end = resolve_report_window(date=date, from_date=from_date, to_date=to_date)
+    events = db.query(models.Event).filter(
+        models.Event.timestamp >= range_start,
+        models.Event.timestamp < range_end,
+    ).all()
+
     hourly_data = {hour: {"entry": 0, "exit": 0} for hour in range(24)}
     for e in events:
-        hour = e.timestamp.hour
+        hour = as_vietnam_time(e.timestamp).hour
         if e.event_type == "ENTRY":
             hourly_data[hour]["entry"] += 1
         elif e.event_type == "EXIT":
             hourly_data[hour]["exit"] += 1
-            
+
     return [{"hour": h, "entry": d["entry"], "exit": d["exit"]} for h, d in hourly_data.items()]
 
 class CameraCreate(BaseModel):
@@ -681,7 +1152,9 @@ async def create_camera(data: CameraCreate, db: Session = Depends(get_db)):
             )
     elif data.source_type == "RTSP":
         # Attempt to open RTSP stream
-        cap = cv2.VideoCapture(data.source_url)
+        cap = cv2.VideoCapture(data.source_url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
         if not cap.isOpened():
             raise HTTPException(
                 status_code=400,
@@ -732,7 +1205,9 @@ async def test_camera_connection(camera_id: int, db: Session = Depends(get_db)):
         if os.path.exists(camera.source_url):
             status_str = "ONLINE"
     elif camera.source_type == "RTSP":
-        cap = cv2.VideoCapture(camera.source_url)
+        cap = cv2.VideoCapture(camera.source_url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
         if cap.isOpened():
             status_str = "ONLINE"
             cap.release()
@@ -759,6 +1234,44 @@ async def test_camera_connection(camera_id: int, db: Session = Depends(get_db)):
 @app.get("/")
 async def root():
     return {"message": "Welcome to LibCounterAI API. Visit /api/health for system status."}
+
+
+@app.get("/api/sync/status")
+async def sync_status():
+    return sync_service.get_status()
+
+
+@app.post("/api/sync/trigger")
+async def sync_trigger():
+    from offline_queue import get_pending, remove, mark_error, is_postgres_alive
+    from database import SessionLocal
+    import models
+    if not is_postgres_alive():
+        return {"message": "PostgreSQL still not reachable", "synced": False}
+    import sync_service
+    ops = get_pending()
+    synced = 0
+    if ops:
+        db = SessionLocal()
+        try:
+            from sync_service import _replay_op
+            for op in ops:
+                ok = _replay_op(op, db)
+                if ok:
+                    remove(op["id"])
+                    synced += 1
+                else:
+                    mark_error(op["id"], "manual_sync_failed")
+                    remove(op["id"])
+        finally:
+            db.close()
+    return {"message": f"Synced {synced} pending operations", "synced": synced}
+
+
+@app.get("/api/sync/pending")
+async def sync_pending():
+    from offline_queue import get_pending
+    return {"pending": get_pending()}
 
 if __name__ == "__main__":
     import uvicorn

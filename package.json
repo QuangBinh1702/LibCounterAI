@@ -1,0 +1,18 @@
+{
+  "name": "libcounterai",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --names api,web --prefix-colors green,blue \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "node scripts/run-dev-api.mjs",
+    "dev:web": "node scripts/run-dev-web.mjs",
+    "db:up": "node scripts/ensure-db.mjs",
+    "dev:full": "npm run prepare:dev && npm run dev",
+    "prepare:dev": ".\\scripts\\dev.cmd prepare",
+    "prepare:dev:quick": ".\\scripts\\dev.cmd prepare -NoDocker -NoSeed -NoInstall",
+    "dev:docker:stop": ".\\scripts\\dev.cmd stop-docker",
+    "dev:validate": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/validate_dev_stack.ps1 -NoInstall"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

@@ -3,13 +3,15 @@ import time
 from geometry import get_crossing_direction
 
 class IoUTracker:
-    def __init__(self, max_lost=15, iou_threshold=0.3):
+    def __init__(self, max_lost=5, iou_threshold=0.2, debounce_seconds=2.0):
         self.max_lost = max_lost
         self.iou_threshold = iou_threshold
+        self.debounce_seconds = debounce_seconds
         self.next_id = 1
-        self.tracks = {} # track_id -> {"bbox": bbox, "lost": 0, "confidence": conf}
+        self.tracks = {} # track_id -> {"bbox": bbox, "velocity": [dx1, dy1, dx2, dy2], "lost": 0, "confidence": conf}
         self.trajectories = {} # track_id -> list of (x, y) bottom-center points
         self.identities = {} # track_id -> {"person_id": int, "person_name": str, "identity_type": str}
+        self.last_crossing = {} # track_id -> {"timestamp": float, "direction": str}
 
     def _iou(self, box1, box2):
         # box format: [x1, y1, x2, y2]
@@ -26,9 +28,31 @@ class IoUTracker:
             return 0.0
         return intersection / union
 
+    def _tracking_point(self, bbox, line_config=None):
+        x1, y1, x2, y2 = bbox
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+        if line_config is not None:
+            line_dx = line_config[1][0] - line_config[0][0]
+            line_dy = line_config[1][1] - line_config[0][1]
+            if abs(line_dy) > abs(line_dx):
+                return (center_x, center_y)
+        return (center_x, y2)
+
+    def _predict_bbox(self, bbox, velocity):
+        return [float(bbox[idx]) + float(velocity[idx]) for idx in range(4)]
+
+    def _smooth_velocity(self, previous_bbox, current_bbox, previous_velocity):
+        delta = [float(current_bbox[idx]) - float(previous_bbox[idx]) for idx in range(4)]
+        return [
+            (0.35 * float(previous_velocity[idx])) + (0.65 * delta[idx])
+            for idx in range(4)
+        ]
+
     def update(self, detections, line_config=None):
         # detections: list of [x1, y1, x2, y2, conf]
         # line_config: list of two points, e.g. [[x1, y1], [x2, y2]]
+        detections = detections or []
         updated_tracks = {}
         matched_detections = set()
         crossing_events = []
@@ -48,19 +72,26 @@ class IoUTracker:
             if best_iou >= self.iou_threshold:
                 # Update existing track
                 matched_detections.add(best_det_idx)
+                current_bbox = detections[best_det_idx][:4]
+                previous_velocity = track_data.get("velocity", [0.0, 0.0, 0.0, 0.0])
                 updated_tracks[track_id] = {
-                    "bbox": detections[best_det_idx][:4],
+                    "bbox": current_bbox,
+                    "velocity": self._smooth_velocity(track_data["bbox"], current_bbox, previous_velocity),
                     "confidence": detections[best_det_idx][4],
-                    "lost": 0
+                    "lost": 0,
+                    "predicted": False,
                 }
             else:
-                # Keep lost track temporarily
+                # Keep the overlay responsive while the detector is skipped or misses a frame.
                 lost_count = track_data.get("lost", 0) + 1
                 if lost_count <= self.max_lost:
+                    velocity = track_data.get("velocity", [0.0, 0.0, 0.0, 0.0])
                     updated_tracks[track_id] = {
-                        "bbox": track_data["bbox"],
-                        "confidence": track_data.get("confidence", 0.0),
-                        "lost": lost_count
+                        "bbox": self._predict_bbox(track_data["bbox"], velocity),
+                        "velocity": velocity,
+                        "confidence": track_data.get("confidence", 0.0) * 0.9,
+                        "lost": lost_count,
+                        "predicted": True,
                     }
         
         # 2. Start new tracks for unmatched detections
@@ -68,8 +99,10 @@ class IoUTracker:
             if idx not in matched_detections:
                 updated_tracks[self.next_id] = {
                     "bbox": det[:4],
+                    "velocity": [0.0, 0.0, 0.0, 0.0],
                     "confidence": det[4],
-                    "lost": 0
+                    "lost": 0,
+                    "predicted": False,
                 }
                 self.next_id += 1
                 
@@ -83,16 +116,16 @@ class IoUTracker:
         for track_id in list(self.identities.keys()):
             if track_id not in active_track_ids:
                 del self.identities[track_id]
+        for track_id in list(self.last_crossing.keys()):
+            if track_id not in active_track_ids:
+                del self.last_crossing[track_id]
         
         # 4. Update trajectories and detect crossing events
         active_tracks = []
         for track_id, data in self.tracks.items():
-            if data["lost"] == 0:
+            if data["lost"] <= self.max_lost:
                 bbox = data["bbox"]
-                # Bottom center point
-                bc_x = (bbox[0] + bbox[2]) / 2.0
-                bc_y = bbox[3]
-                current_point = (bc_x, bc_y)
+                current_point = self._tracking_point(bbox, line_config)
                 
                 # Check for crossing if history exists and line_config is provided
                 if track_id in self.trajectories and line_config is not None:
@@ -101,11 +134,24 @@ class IoUTracker:
                         line_config[0], line_config[1], prev_point, current_point
                     )
                     if direction != 0:
-                        crossing_events.append({
-                            "track_id": track_id,
-                            "direction": "ENTRY" if direction == 1 else "EXIT",
-                            "timestamp": time.time()
-                        })
+                        now = time.time()
+                        direction_label = "ENTRY" if direction == 1 else "EXIT"
+                        last_crossing = self.last_crossing.get(track_id)
+                        is_duplicate = (
+                            last_crossing is not None
+                            and last_crossing["direction"] == direction_label
+                            and now - last_crossing["timestamp"] < self.debounce_seconds
+                        )
+                        if not is_duplicate:
+                            self.last_crossing[track_id] = {
+                                "timestamp": now,
+                                "direction": direction_label,
+                            }
+                            crossing_events.append({
+                                "track_id": track_id,
+                                "direction": direction_label,
+                                "timestamp": now
+                            })
                 
                 # Update trajectory history
                 if track_id not in self.trajectories:
@@ -118,11 +164,12 @@ class IoUTracker:
                 track_info = {
                     "track_id": track_id,
                     "bbox": [float(x) for x in bbox],
-                    "confidence": float(data["confidence"])
+                    "confidence": float(data["confidence"]),
+                    "lost": int(data.get("lost", 0)),
+                    "predicted": bool(data.get("predicted", False)),
                 }
                 if track_id in self.identities:
                     track_info.update(self.identities[track_id])
                 active_tracks.append(track_info)
                 
         return active_tracks, crossing_events
-

@@ -237,12 +237,17 @@ Current product scope:
 - Durable story proof state in `harness.db`, queried with
   `scripts/bin/harness-cli.exe query matrix` on Windows.
 
-As of 2026-07-06, the durable Harness matrix contains 15 implemented stories
+As of 2026-07-07, the durable Harness matrix contains 16 implemented stories
 covering project setup, person detection/tracking, database schema, line
 crossing, web UI, face pipeline, enrollment, face matching, RTSP camera checks,
 unknown re-identification, visit sessions, session API/UI sync, CSV export, and
-known/unknown analytics, plus browser dashboard E2E smoke proof. `scripts/bin/harness-cli.exe story verify-all` passes
-for all 15 stories on Windows when run from the repository root.
+known/unknown analytics, browser dashboard E2E smoke proof, and real-backend
+demo seed data. The local app launcher is available as `npm run dev` and uses
+`concurrently` to stream FastAPI (`[api]`) and Vite (`[web]`) logs in the
+foreground while PostgreSQL/Redis are managed separately. Use `npm run dev:api`
+or `npm run dev:web` for one side, and `npm run prepare:dev` / `npm run dev:full`
+when Docker PostgreSQL/Redis and demo seed should be prepared first; live proof
+for the full mode is pending a running Docker Desktop engine.
 
 ## Product Sources
 

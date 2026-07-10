@@ -29,7 +29,7 @@ Run the full Harness verification suite:
 Expected result:
 
 ```text
-15 stories verified: 15 passed, 0 failed, 0 skipped
+16 stories verified: 16 passed, 0 failed, 0 skipped
 ```
 
 ## Browser Smoke
@@ -51,35 +51,55 @@ the dashboard, opens Chromium, and checks:
 
 ## Manual Demo
 
-For a manual demo with the real backend:
+For a manual demo with the real backend, use the one-command local dev launcher:
 
 ```powershell
-docker compose up -d db redis
-$env:POSTGRES_HOST="localhost"
-$env:POSTGRES_PORT="5432"
-$env:POSTGRES_DB="libcounterai"
-$env:POSTGRES_USER="postgres"
-$env:POSTGRES_PASSWORD="password"
-$env:REDIS_HOST="localhost"
-$env:REDIS_PORT="6379"
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r app\requirements.txt
-.\.venv\Scripts\python.exe scripts\setup_database.py --require-postgres --seed-demo
-.\.venv\Scripts\python.exe -m uvicorn main:app --app-dir app --host 127.0.0.1 --port 8000
+npm run dev
 ```
 
-The production-aligned database is PostgreSQL with pgvector. The setup script
-creates the `vector` extension, creates SQLAlchemy tables, and adds HNSW vector
-indexes for known and unknown face embeddings.
+This uses `concurrently` in the foreground with colored `[api]` / `[web]`
+prefixes, the same pattern as a typical Vite + API monorepo. Logs stream in the
+terminal; press `Ctrl+C` to stop both processes. Docker PostgreSQL and Redis are
+expected to be managed separately for the default command.
 
-In a second terminal:
+Start only one side when needed:
 
 ```powershell
-npm --prefix surfaces/browser install
-npm --prefix surfaces/browser run dev -- --host 127.0.0.1 --port 5173
+npm run dev:api
+npm run dev:web
 ```
 
-Open `http://127.0.0.1:5173`.
+Prepare Docker services and demo seed data, then start both apps:
+
+```powershell
+npm run prepare:dev
+npm run dev
+```
+
+Or do both in one step:
+
+```powershell
+npm run dev:full
+```
+
+The backend reads local runtime settings from the repo-root `.env` file. The
+production-aligned database is PostgreSQL with pgvector. The setup flow creates
+the `vector` extension, creates SQLAlchemy tables, and adds HNSW vector indexes
+for known and unknown face embeddings. It also refreshes deterministic demo
+data:
+
+- one `Demo Gate` camera and line configuration;
+- two known people with active 128-dimensional SFace templates;
+- one active unknown visitor identity;
+- ENTRY/EXIT events and visit sessions that populate history, CSV export,
+  occupancy, known/unknown breakdown, and hourly analytics.
+
+The demo seed is idempotent. Running it again refreshes the demo records instead
+of duplicating sessions or events.
+
+Open the frontend URL printed by `npm run dev`. By default it follows
+`FRONTEND_PORT` in `.env` (currently often `http://127.0.0.1:5175`). Press
+`Ctrl+C` in that terminal to stop both processes.
 
 Demo path:
 

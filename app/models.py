@@ -39,8 +39,9 @@ class VectorType(TypeDecorator):
     def process_result_value(self, value, dialect):
         if value is not None:
             if dialect.name == "postgresql" and not isinstance(value, str):
-                # pgvector may return a native list/array when the driver is registered.
-                return value
+                if hasattr(value, "tolist"):
+                    value = value.tolist()
+                return [float(x) for x in value]
             try:
                 return json.loads(value)
             except Exception:
@@ -163,7 +164,7 @@ class Event(Base):
     unknown_id = Column(Integer, ForeignKey("unknown_identities.id", ondelete="SET NULL"), nullable=True)
     track_id = Column(Integer, nullable=False)
     camera_id = Column(Integer, ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False)
-    timestamp = Column(DateTime(timezone=True), nullable=False, default=datetime.datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), nullable=False, default=datetime.datetime.utcnow, index=True)
     confidence = Column(Float, nullable=False)
     metadata_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.datetime.utcnow)
@@ -185,7 +186,7 @@ class VisitSession(Base):
     entry_event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True)
     exit_camera_id = Column(Integer, ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True)
     exit_event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True)
-    entry_at = Column(DateTime(timezone=True), nullable=False)
+    entry_at = Column(DateTime(timezone=True), nullable=False, index=True)
     exit_at = Column(DateTime(timezone=True), nullable=True)
     duration_seconds = Column(Integer, nullable=True)
     status = Column(String(20), nullable=False, default="ACTIVE") # 'ACTIVE', 'CLOSED', 'UNMATCHED', 'TIMEOUT'

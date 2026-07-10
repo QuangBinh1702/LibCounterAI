@@ -13,13 +13,12 @@ the work is selected or when a product decision needs a durable place to land.
 | E01 Web Demo | Setup, person detection/tracking, database setup, line crossing, browser dashboard, camera API | implemented |
 | E02 Known Person | Face pipeline, enrollment API, real-time face matching and event logging | implemented |
 | E03 Unknown Visitor | Unknown re-identification, visit sessions, session API/UI sync | implemented |
-| E04 Dashboard Reports | CSV export, date filtering, known/unknown analytics breakdown, browser smoke proof | implemented |
+| E04 Dashboard Reports | CSV export, date filtering, known/unknown analytics breakdown, browser smoke proof, demo seed data; one-command local dev stack in progress | implemented |
 
 ## Recommended Next Stories
 
 | Candidate | Why it matters | Suggested lane |
 | --- | --- | --- |
-| Demo seed data | Makes the real-backend manual demo reproducible with preloaded persons, sessions, and analytics data. | normal |
 | Unit proof sweep | Adds focused unit tests around line crossing, session state, analytics aggregation, and identity matching thresholds. | normal |
 | Privacy and retention hardening | Clarifies biometric retention, unknown identity expiry, audit logging, and operational safeguards before production use. | high-risk |
 | Auth and staff roles | Adds real librarian/admin access control if this moves beyond a controlled demo. | high-risk |

@@ -18,7 +18,7 @@ interface NavTabsProps {
   iconProps?: { size: number; weight: 'regular' };
 }
 
-const GLIDER_SPRING = { type: 'spring' as const, stiffness: 380, damping: 34, mass: 0.85 };
+const GLIDER_SPRING = { type: 'spring' as const, stiffness: 300, damping: 30, mass: 0.8 };
 
 export function NavTabs({ tabs, activeTab, onChange, iconProps = { size: 14, weight: 'regular' } }: NavTabsProps) {
   const reduceMotion = useReducedMotion();

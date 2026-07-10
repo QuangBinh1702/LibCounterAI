@@ -14,6 +14,29 @@ except Exception as e:
     print(f"Error importing database/models: {e}")
     sys.exit(1)
 
+
+def cleanup_test_records(db):
+    test_person = db.query(models.Person).filter_by(member_code="SV123456").first()
+    test_camera = db.query(models.Camera).filter_by(name="Main Entrance Gate").first()
+    test_user = db.query(models.User).filter_by(username="librarian_test").first()
+
+    if test_person:
+        db.query(models.VisitSession).filter_by(person_id=test_person.id).delete()
+        db.query(models.Event).filter_by(person_id=test_person.id).delete()
+        db.delete(test_person)
+
+    if test_camera:
+        db.query(models.VisitSession).filter_by(entry_camera_id=test_camera.id).delete()
+        db.query(models.Event).filter_by(camera_id=test_camera.id).delete()
+        db.query(models.CameraConfig).filter_by(camera_id=test_camera.id).delete()
+        db.delete(test_camera)
+
+    if test_user:
+        db.delete(test_user)
+
+    db.commit()
+
+
 # 1. Create tables
 print("Creating database tables...")
 try:
@@ -27,6 +50,8 @@ except Exception as e:
 print("Testing database CRUD operations...")
 db = SessionLocal()
 try:
+    cleanup_test_records(db)
+
     # 2.1 Add User
     user = models.User(
         username="librarian_test",
@@ -119,14 +144,7 @@ try:
     
     # 4. Clean up test data
     print("Cleaning up test database records...")
-    db.delete(session)
-    db.delete(event)
-    db.delete(face)
-    db.delete(person)
-    db.delete(camera_config)
-    db.delete(camera)
-    db.delete(queried_user)
-    db.commit()
+    cleanup_test_records(db)
     print("Cleanup transaction committed successfully.")
     
     db.close()

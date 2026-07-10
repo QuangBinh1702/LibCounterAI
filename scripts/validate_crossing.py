@@ -5,6 +5,8 @@ import subprocess
 import urllib.request
 import json
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 # Setup paths
 CWD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENV_PYTHON = os.path.join(CWD, ".venv", "Scripts", "python.exe")
@@ -34,6 +36,14 @@ try:
     traj_start_2 = (150, 250)
     traj_end_2 = (150, 270)
     assert intersects(line_start, line_end, traj_start_2, traj_end_2) == False, "Geometry false intersection failed"
+
+    vertical_line_start = (320, 40)
+    vertical_line_end = (320, 600)
+    horizontal_traj_start = (260, 300)
+    horizontal_traj_end = (340, 300)
+    assert intersects(vertical_line_start, vertical_line_end, horizontal_traj_start, horizontal_traj_end) == True, "Vertical line intersection failed"
+    dir_2 = get_crossing_direction(vertical_line_start, vertical_line_end, horizontal_traj_start, horizontal_traj_end)
+    assert dir_2 == -1, f"Expected vertical crossing direction -1, got {dir_2}"
     
     print("Geometry unit tests passed successfully.")
 except Exception as e:
@@ -171,6 +181,24 @@ try:
     
     event = crossing_events_2[0]
     assert event.get("direction") == "ENTRY", f"Expected direction ENTRY, got {event.get('direction')}"
+
+    vertical_session_id = f"vertical_session_{int(time.time())}"
+    vertical_line_config_str = "[[320, 40], [320, 600]]"
+
+    # For vertical lines the tracker uses bbox center, not feet, so side-to-side walking is counted.
+    mock_dets_3 = "[[180, 100, 340, 500, 0.9]]"
+    print("Sending Frame 3 (Person left of vertical line)...")
+    res_3 = send_frame(mock_dets_3, vertical_line_config_str, vertical_session_id)
+    print(f"Frame 3 Response: {res_3}")
+
+    mock_dets_4 = "[[260, 100, 420, 500, 0.9]]"
+    print("Sending Frame 4 (Person crossed vertical line)...")
+    res_4 = send_frame(mock_dets_4, vertical_line_config_str, vertical_session_id)
+    print(f"Frame 4 Response: {res_4}")
+
+    crossing_events_4 = res_4.get("crossing_events", [])
+    assert len(crossing_events_4) == 1, f"Expected 1 vertical crossing event, got {len(crossing_events_4)}"
+    assert crossing_events_4[0].get("direction") == "EXIT", f"Expected vertical direction EXIT, got {crossing_events_4[0].get('direction')}"
     
     print("Line crossing integration tests PASSED successfully!")
     validation_passed = True

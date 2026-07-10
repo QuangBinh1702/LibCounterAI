@@ -4,7 +4,14 @@
 
 LibCounterAI là hệ thống nhận diện khuôn mặt và thống kê lượt ra/vào thư viện của độc giả theo thời gian thực sử dụng camera giám sát kết hợp với xử lý AI tập trung trên server.
 
-## 2. Mục tiêu hệ thống
+## 2. Quy ước thời gian báo cáo
+
+- Người dùng xem lịch sử và thống kê theo giờ Việt Nam (`Asia/Ho_Chi_Minh`,
+  `UTC+7`).
+- Backend lưu timestamp theo UTC và chuyển đổi sang giờ Việt Nam khi gom biểu
+  đồ theo giờ hoặc xác định khoảng ngày báo cáo.
+
+## 3. Mục tiêu hệ thống
 
 - Phân loại rõ ràng người quen (độc giả đã đăng ký mẫu khuôn mặt) và người lạ (khách vãng lai).
 - Tự động gán định danh ẩn danh (`UNKNOWN_XXX`) cho người lạ nhằm phục vụ thống kê không cần danh tính.

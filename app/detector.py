@@ -11,9 +11,23 @@ class YOLOv8Detector:
         self.conf_threshold = conf_threshold
         self.nms_threshold = nms_threshold
         
-        # Load ONNX model
-        # Try CPU execution provider first
-        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        available_providers = ort.get_available_providers()
+        preferred_providers = [
+            provider
+            for provider in ("CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider")
+            if provider in available_providers
+        ]
+        if not preferred_providers:
+            preferred_providers = ["CPUExecutionProvider"]
+
+        self.session = ort.InferenceSession(
+            model_path,
+            sess_options=session_options,
+            providers=preferred_providers,
+        )
         self.input_name = self.session.get_inputs()[0].name
         self.input_shape = self.session.get_inputs()[0].shape # [1, 3, 640, 640]
         self.input_width = self.input_shape[2]

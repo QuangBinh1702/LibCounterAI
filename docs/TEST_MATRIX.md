@@ -38,8 +38,10 @@ it synchronized when story proof changes.
 | US-011 | Unknown visit session tracking | no | yes | no | yes | implemented | Story packet proof; Harness matrix |
 | US-012 | Unknown session API and UI sync | no | yes | no | yes | implemented | Story packet proof; Harness matrix |
 | US-013 | CSV export and date-filtered sessions | no | yes | no | yes | implemented | Story packet proof; Harness matrix |
-| US-014 | Enhanced analytics with known-unknown breakdown | no | yes | no | yes | implemented | Story packet proof; Harness matrix |
+| US-014 | Enhanced analytics with known-unknown breakdown | no | yes | no | yes | implemented | Story packet proof; Vietnam UTC+7 hourly aggregation and chart contract documented; timezone smoke proof passed |
 | US-015 | E2E dashboard smoke and demo runbook | no | yes | yes | yes | implemented | `npm --prefix surfaces/browser run test:e2e` passed on 2026-07-06 |
+| US-016 | Demo seed data for real-backend dashboard demo | no | yes | no | yes | implemented | `.\.venv\Scripts\python.exe scripts\validate_demo_seed.py` passed against PostgreSQL/pgvector via repo `.env` on 2026-07-07 |
+| US-017 | One-command local dev stack | no | no | no | no | in_progress | Launcher added; full proof blocked because Docker Desktop did not make the Docker engine ready within 150 seconds in this environment |
 
 ## Evidence Rules
 
@@ -56,4 +58,8 @@ it synchronized when story proof changes.
 
 - Most implemented stories still lack unit-level proof.
 - US-015 records browser E2E smoke proof for the dashboard workflow.
-- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 15 stories on 2026-07-06.
+- US-016 records repeatable real-backend demo seed proof for camera, persons,
+  sessions, and analytics data.
+- US-017 adds the one-command local dev stack launcher, but live-stack proof is
+  blocked until Docker Desktop is running successfully on the machine.
+- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 16 stories on 2026-07-07 before US-017 was added.
