@@ -1,20 +1,20 @@
 import { useEffect, useState, type ComponentType } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 
-type TabId = 'monitor' | 'registry' | 'history' | 'analytics';
+type OpsTabId = 'monitor' | 'registry' | 'history' | 'analytics';
 
 type TabIcon = ComponentType<{ size?: number; weight?: 'regular' }>;
 
 export interface NavTabItem {
-  id: TabId;
+  id: OpsTabId;
   label: string;
   Icon: TabIcon;
 }
 
 interface NavTabsProps {
   tabs: NavTabItem[];
-  activeTab: TabId;
-  onChange: (tab: TabId) => void;
+  activeTab: OpsTabId | null;
+  onChange: (tab: OpsTabId) => void;
   iconProps?: { size: number; weight: 'regular' };
 }
 
@@ -32,10 +32,10 @@ export function NavTabs({ tabs, activeTab, onChange, iconProps = { size: 14, wei
     return () => mq.removeEventListener('change', update);
   }, []);
 
-  const showGlider = !reduceMotion && !isCompactNav;
+  const showGlider = !reduceMotion && !isCompactNav && activeTab != null;
 
   return (
-    <nav className="nav-tabs" aria-label="Điều hướng chính">
+    <nav className="nav-tabs" aria-label="Điều hướng chính" data-testid="nav-tabs">
       {tabs.map((tab) => {
         const isActive = activeTab === tab.id;
 

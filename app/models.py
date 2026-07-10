@@ -129,7 +129,7 @@ class Camera(Base):
     
     # Relationships
     config = relationship("CameraConfig", back_populates="camera", uselist=False, cascade="all, delete-orphan")
-    events = relationship("Event", back_populates="camera")
+    events = relationship("Event", back_populates="camera", passive_deletes=True)
 
 
 class CameraConfig(Base):

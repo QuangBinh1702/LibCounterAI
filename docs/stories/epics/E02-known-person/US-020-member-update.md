@@ -25,6 +25,8 @@ Add an "Edit" (Sửa) button next to the "Delete" (Xóa) button on the members l
 - [x] PUT `/api/persons/{person_id}` endpoint updates person details and face template (if new file is uploaded).
 - [x] Duplicate member codes are rejected during update (excluding self).
 - [x] Form validation works and shows success toast on successful save.
+- [x] Update dialog is rendered in a document-level portal so its backdrop covers the whole viewport, including the fixed header and animated page region.
+- [x] Update dialog locks background scroll, focuses the name field, and closes via Escape or backdrop click.
 
 ## Design Notes
 
@@ -50,3 +52,9 @@ Frontend Vite production build succeeded:
 vite v8.1.3 building client environment for production...
 built in 967ms
 ```
+
+2026-07-10 visual polish: member-update dialog now uses a document-level portal
+to preserve a full-viewport backdrop while page transitions are animated. The
+browser unit suite passed: 9 files / 40 tests. The existing dashboard E2E smoke
+currently stops at authentication before its monitor assertion and needs its
+login fixture updated separately.

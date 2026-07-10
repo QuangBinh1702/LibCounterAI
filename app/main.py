@@ -10,6 +10,18 @@ from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Req
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    items: list[T]
+    total: int
+
+def paginate(query, skip: int = 0, limit: int = 100):
+    total = query.count()
+    items = query.offset(skip).limit(limit).all()
+    return items, total
 from sqlalchemy.orm import Session, joinedload
 import cv2
 import numpy as np
@@ -29,11 +41,13 @@ app = FastAPI(
 )
 
 # Enable CORS for frontend.
-# allow_credentials=False so wildcard origins are valid in browsers.
+# CORS_ORIGINS: comma-separated list of allowed origins, or "*" for all.
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
+origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=origins,
+    allow_credentials=origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -50,6 +64,11 @@ UNKNOWN_IDENTITY_EXPIRE_HOURS = int(os.getenv("UNKNOWN_IDENTITY_EXPIRE_HOURS", "
 UNKNOWN_EXPIRED_GRACE_HOURS = int(os.getenv("UNKNOWN_EXPIRED_GRACE_HOURS", "72"))
 RETENTION_CLEANUP_INTERVAL_SECONDS = int(os.getenv("RETENTION_CLEANUP_INTERVAL_SECONDS", "3600"))
 AUDIT_LOG_ENABLED = os.getenv("AUDIT_LOG_ENABLED", "true").lower() == "true"
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
+
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
+ALLOWED_PERSON_ROLES = {"STUDENT", "FACULTY", "STAFF", "GUEST"}
+ALLOWED_USER_ROLES = {"ADMIN", "LIBRARIAN"}
 
 
 logger = logging.getLogger("libcounterai")
@@ -153,11 +172,28 @@ def parse_float(value, default: float) -> float:
     except (TypeError, ValueError):
         return default
 
-def validate_image_file(file: UploadFile, max_size_mb: int = 10) -> int:
-    MAX_SIZE = max_size_mb * 1024 * 1024
-    if file.content_type and not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail=f"Invalid content type: {file.content_type}. Only image files are allowed.")
-    return MAX_SIZE
+async def validate_image_file(file: UploadFile) -> bytes:
+    if file.content_type:
+        if not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail=f"Invalid content type: {file.content_type}. Only image files are allowed.")
+        if file.content_type not in ALLOWED_IMAGE_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_IMAGE_TYPES))
+            raise HTTPException(status_code=400, detail=f"Unsupported image type: {file.content_type}. Allowed: {allowed}.")
+    contents = await file.read()
+    size_mb = len(contents) / (1024 * 1024)
+    if size_mb > MAX_UPLOAD_SIZE_MB:
+        raise HTTPException(status_code=400, detail=f"File too large ({size_mb:.1f} MB). Maximum is {MAX_UPLOAD_SIZE_MB} MB.")
+    if len(contents) < 32:
+        raise HTTPException(status_code=400, detail="File is empty or too small.")
+    magic = contents[:8]
+    if not any((
+        magic[:2] == b'\xff\xd8',
+        magic[:4] == b'\x89PNG',
+        magic[:4] == b'RIFF',
+        magic[:2] == b'BM',
+    )):
+        raise HTTPException(status_code=400, detail=f"Invalid image signature. Expected JPEG, PNG, WEBP, or BMP.")
+    return contents
 
 
 def invalidate_face_template_cache() -> None:
@@ -398,6 +434,27 @@ def load_models():
     print("Offline sync service started.")
     start_retention_cleanup()
     print("Retention cleanup started.")
+    _seed_admin_user()
+
+def _seed_admin_user():
+    from database import SessionLocal
+    from auth import hash_password
+    db = SessionLocal()
+    try:
+        existing = db.query(models.User).filter_by(username="admin").first()
+        if existing is None:
+            db.add(models.User(
+                username="admin",
+                password_hash=hash_password("admin"),
+                role="ADMIN",
+                status="ACTIVE",
+            ))
+            db.commit()
+            print("Created default admin user (admin/admin).")
+    except Exception as e:
+        print(f"Seed admin user skipped: {e}")
+    finally:
+        db.close()
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
@@ -467,7 +524,7 @@ async def process_frame(
                 headers=cors_headers(request),
             )
 
-        contents = await file.read()
+        contents = await validate_image_file(file)
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
@@ -838,7 +895,12 @@ async def register_person(
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Check duplicate member_code
+    # 1. Validate role
+    if role.upper() not in ALLOWED_PERSON_ROLES:
+        allowed = ", ".join(sorted(ALLOWED_PERSON_ROLES))
+        raise HTTPException(status_code=400, detail=f"Invalid role '{role}'. Allowed: {allowed}.")
+
+    # 2. Check duplicate member_code
     db_person = db.query(models.Person).filter_by(member_code=member_code).first()
     if db_person:
         raise HTTPException(
@@ -846,13 +908,15 @@ async def register_person(
             detail=f"Member code {member_code} is already registered."
         )
         
-    # 2. Read and decode uploaded image
+    # 3. Read and decode uploaded image
     try:
-        contents = await file.read()
+        contents = await validate_image_file(file)
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("Decoded image is None")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -932,18 +996,26 @@ async def register_person(
         return {"message": "Person queued for registration (database unavailable)", "queued": True}
 
 @app.get("/api/persons")
-async def get_persons(db: Session = Depends(get_db)):
-    persons = db.query(models.Person).all()
-    return [
-        {
-            "id": p.id,
-            "full_name": p.full_name,
-            "member_code": p.member_code,
-            "role": p.role,
-            "status": p.status
-        }
-        for p in persons
-    ]
+async def get_persons(
+    db: Session = Depends(get_db),
+    skip: int = 0,
+    limit: int = 100,
+):
+    query = db.query(models.Person).order_by(models.Person.created_at.desc())
+    persons, total = paginate(query, skip, limit)
+    return PaginatedResponse(
+        items=[
+            {
+                "id": p.id,
+                "full_name": p.full_name,
+                "member_code": p.member_code,
+                "role": p.role,
+                "status": p.status
+            }
+            for p in persons
+        ],
+        total=total,
+    )
 
 @app.delete("/api/persons/{person_id}")
 async def delete_person(person_id: int, db: Session = Depends(get_db)):
@@ -979,7 +1051,11 @@ async def update_person(
     person = db.query(models.Person).filter_by(id=person_id).first()
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
-        
+
+    if role.upper() not in ALLOWED_PERSON_ROLES:
+        allowed = ", ".join(sorted(ALLOWED_PERSON_ROLES))
+        raise HTTPException(status_code=400, detail=f"Invalid role '{role}'. Allowed: {allowed}.")
+
     # Check duplicate member_code (excluding self)
     db_person = db.query(models.Person).filter(
         models.Person.member_code == member_code,
@@ -1000,11 +1076,13 @@ async def update_person(
     # Optional image upload for updating template
     if file is not None and file.filename:
         try:
-            contents = await file.read()
+            contents = await validate_image_file(file)
             nparr = np.frombuffer(contents, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img is None:
                 raise ValueError("Decoded image is None")
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1072,8 +1150,13 @@ async def update_person(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/events")
-async def get_events(db: Session = Depends(get_db)):
-    events = db.query(models.Event).order_by(models.Event.timestamp.desc()).all()
+async def get_events(
+    db: Session = Depends(get_db),
+    skip: int = 0,
+    limit: int = 100,
+):
+    query = db.query(models.Event).order_by(models.Event.timestamp.desc())
+    events, total = paginate(query, skip, limit)
     result = []
     for e in events:
         name = "Unknown"
@@ -1096,7 +1179,7 @@ async def get_events(db: Session = Depends(get_db)):
             "timestamp": e.timestamp.isoformat(),
             "confidence": e.confidence
         })
-    return result
+    return PaginatedResponse(items=result, total=total)
 
 def parse_day_start(value: str | None) -> datetime.datetime | None:
     if not value:
@@ -1132,6 +1215,8 @@ async def get_sessions(
     date: str = None,
     from_date: str = None,
     to_date: str = None,
+    skip: int = 0,
+    limit: int = 100,
 ):
     query = db.query(models.VisitSession)
 
@@ -1143,7 +1228,8 @@ async def get_sessions(
             models.VisitSession.entry_at < day_end,
         )
 
-    sessions = query.order_by(models.VisitSession.entry_at.desc()).all()
+    query = query.order_by(models.VisitSession.entry_at.desc())
+    sessions, total = paginate(query, skip, limit)
     result = []
     for s in sessions:
         name = "Unknown"
@@ -1165,7 +1251,7 @@ async def get_sessions(
             "duration_seconds": s.duration_seconds,
             "status": s.status
         })
-    return result
+    return PaginatedResponse(items=result, total=total)
 
 @app.get("/api/stats/occupancy")
 async def get_occupancy(
@@ -1262,32 +1348,124 @@ async def get_hourly_stats(
     return [{"hour": h, "entry": d["entry"], "exit": d["exit"]} for h, d in hourly_data.items()]
 
 
+# ── Auth endpoints ────────────────────────────────────────────────
+
+
+from auth import (
+    hash_password, verify_password, create_access_token,
+    get_current_user, require_user, require_admin,
+)
+
+
+@app.post("/api/auth/login")
+async def login(
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+    user = db.query(models.User).filter_by(username=username, status="ACTIVE").first()
+    if not user or not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = create_access_token({"sub": str(user.id), "role": user.role})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user.id, "username": user.username, "role": user.role},
+    }
+
+
+@app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)
+async def register(
+    body: dict,
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+):
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+    role = body.get("role", "LIBRARIAN").strip().upper()
+    if not username or len(username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if not password or len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if role not in ALLOWED_USER_ROLES:
+        allowed = ", ".join(sorted(ALLOWED_USER_ROLES))
+        raise HTTPException(status_code=400, detail=f"Invalid role '{role}'. Allowed: {allowed}.")
+    existing = db.query(models.User).filter_by(username=username).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = models.User(
+        username=username,
+        password_hash=hash_password(password),
+        role=role,
+        status="ACTIVE",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    audit_log(db, "register", "user", user.id, details={"username": username, "role": role})
+    return {"id": user.id, "username": user.username, "role": user.role}
+
+
+@app.get("/api/auth/me")
+async def auth_me(user: models.User = Depends(require_user)):
+    return {"id": user.id, "username": user.username, "role": user.role, "status": user.status}
+
+
+@app.get("/api/auth/users")
+async def list_users(
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+    skip: int = 0,
+    limit: int = 100,
+):
+    query = db.query(models.User).order_by(models.User.created_at.desc())
+    users, total = paginate(query, skip, limit)
+    return PaginatedResponse(
+        items=[{"id": u.id, "username": u.username, "role": u.role, "status": u.status} for u in users],
+        total=total,
+    )
+
+
 # ── Retention & audit endpoints ────────────────────────────────────
 
 
 @app.get("/api/admin/expired-unknowns")
-async def get_expired_unknowns(db: Session = Depends(get_db)):
-    expired = (
+async def get_expired_unknowns(
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+    skip: int = 0,
+    limit: int = 100,
+):
+    query = (
         db.query(models.UnknownIdentity)
         .filter(models.UnknownIdentity.status == "EXPIRED")
         .order_by(models.UnknownIdentity.expire_at.desc())
-        .all()
     )
-    return [
-        {
-            "id": u.id,
-            "anonymous_code": u.anonymous_code,
-            "expire_at": u.expire_at.isoformat() if u.expire_at else None,
-            "visit_count": u.visit_count,
-            "has_embedding": u.embedding_vector is not None,
-            "created_at": u.created_at.isoformat() if u.created_at else None,
-        }
-        for u in expired
-    ]
+    expired, total = paginate(query, skip, limit)
+    return PaginatedResponse(
+        items=[
+            {
+                "id": u.id,
+                "anonymous_code": u.anonymous_code,
+                "expire_at": u.expire_at.isoformat() if u.expire_at else None,
+                "visit_count": u.visit_count,
+                "has_embedding": u.embedding_vector is not None,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in expired
+        ],
+        total=total,
+    )
 
 
 @app.post("/api/admin/retention/cleanup")
-async def trigger_retention_cleanup(db: Session = Depends(get_db)):
+async def trigger_retention_cleanup(
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+):
     now = utc_now()
     closed = _close_expired_sessions(db, now)
     expired = _expire_unknown_identities(db, now)
@@ -1305,54 +1483,67 @@ async def get_audit_log(
     db: Session = Depends(get_db),
     action: str | None = None,
     entity_type: str | None = None,
+    skip: int = 0,
     limit: int = 100,
-    offset: int = 0,
+    _admin: models.User = Depends(require_admin),
 ):
     query = db.query(models.AuditLog)
     if action:
         query = query.filter(models.AuditLog.action == action)
     if entity_type:
         query = query.filter(models.AuditLog.entity_type == entity_type)
-    entries = query.order_by(models.AuditLog.created_at.desc()).offset(offset).limit(limit).all()
-    return [
-        {
-            "id": e.id,
-            "action": e.action,
-            "entity_type": e.entity_type,
-            "entity_id": e.entity_id,
-            "actor": e.actor,
-            "details": e.details,
-            "ip_address": e.ip_address,
-            "created_at": e.created_at.isoformat() if e.created_at else None,
-        }
-        for e in entries
-    ]
+    query = query.order_by(models.AuditLog.created_at.desc())
+    entries, total = paginate(query, skip, limit)
+    return PaginatedResponse(
+        items=[
+            {
+                "id": e.id,
+                "action": e.action,
+                "entity_type": e.entity_type,
+                "entity_id": e.entity_id,
+                "actor": e.actor,
+                "details": e.details,
+                "ip_address": e.ip_address,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in entries
+        ],
+        total=total,
+    )
 
 
 @app.get("/api/persons/{person_id}/templates")
-async def get_person_templates(person_id: int, db: Session = Depends(get_db)):
+async def get_person_templates(
+    person_id: int,
+    db: Session = Depends(get_db),
+    skip: int = 0,
+    limit: int = 100,
+):
     person = db.query(models.Person).filter_by(id=person_id).first()
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
-    templates = (
+    query = (
         db.query(models.FaceTemplate)
         .filter_by(person_id=person_id)
         .order_by(models.FaceTemplate.created_at.desc())
-        .all()
     )
-    return [
-        {
-            "id": t.id,
-            "model_name": t.model_name,
-            "model_version": t.model_version,
-            "quality_score": t.quality_score,
-            "source_type": t.source_type,
-            "is_active": t.is_active,
-            "has_embedding": t.embedding_vector is not None,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-        }
-        for t in templates
-    ]
+    templates, total = paginate(query, skip, limit)
+    return PaginatedResponse(
+        items=[
+            {
+                "id": t.id,
+                "model_name": t.model_name,
+                "model_version": t.model_version,
+                "quality_score": t.quality_score,
+                "source_type": t.source_type,
+                "is_active": t.is_active,
+                "has_embedding": t.embedding_vector is not None,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in templates
+        ],
+        total=total,
+    )
 
 
 @app.delete("/api/persons/{person_id}/templates/{template_id}")
@@ -1361,6 +1552,7 @@ async def delete_person_template(
     template_id: int,
     request: Request,
     db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
 ):
     person = db.query(models.Person).filter_by(id=person_id).first()
     if not person:
@@ -1380,7 +1572,9 @@ async def delete_person_template(
 
 
 @app.get("/api/admin/retention/config")
-async def get_retention_config():
+async def get_retention_config(
+    _admin: models.User = Depends(require_admin),
+):
     return {
         "unknown_identity_expire_hours": UNKNOWN_IDENTITY_EXPIRE_HOURS,
         "unknown_expired_grace_hours": UNKNOWN_EXPIRED_GRACE_HOURS,
@@ -1394,19 +1588,27 @@ class CameraCreate(BaseModel):
     source_url: str
 
 @app.get("/api/cameras")
-async def get_cameras(db: Session = Depends(get_db)):
-    cameras = db.query(models.Camera).all()
-    return [
-        {
-            "id": c.id,
-            "name": c.name,
-            "source_type": c.source_type,
-            "source_url": c.source_url,
-            "status": c.status,
-            "last_online_at": c.last_online_at.isoformat() if c.last_online_at else None
-        }
-        for c in cameras
-    ]
+async def get_cameras(
+    db: Session = Depends(get_db),
+    skip: int = 0,
+    limit: int = 100,
+):
+    query = db.query(models.Camera).order_by(models.Camera.created_at.desc())
+    cameras, total = paginate(query, skip, limit)
+    return PaginatedResponse(
+        items=[
+            {
+                "id": c.id,
+                "name": c.name,
+                "source_type": c.source_type,
+                "source_url": c.source_url,
+                "status": c.status,
+                "last_online_at": c.last_online_at.isoformat() if c.last_online_at else None
+            }
+            for c in cameras
+        ],
+        total=total,
+    )
 
 @app.post("/api/cameras")
 async def create_camera(data: CameraCreate, db: Session = Depends(get_db)):
@@ -1462,6 +1664,26 @@ async def create_camera(data: CameraCreate, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put("/api/cameras/{camera_id}")
+async def update_camera(camera_id: int, data: CameraCreate, db: Session = Depends(get_db)):
+    camera = db.query(models.Camera).filter_by(id=camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    try:
+        camera.name = data.name
+        camera.source_url = data.source_url
+        db.commit()
+        return {
+            "id": camera.id,
+            "name": camera.name,
+            "source_type": camera.source_type,
+            "source_url": camera.source_url,
+            "status": camera.status
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/cameras/{camera_id}/test")
 async def test_camera_connection(camera_id: int, db: Session = Depends(get_db)):
     camera = db.query(models.Camera).filter_by(id=camera_id).first()
@@ -1495,6 +1717,19 @@ async def test_camera_connection(camera_id: int, db: Session = Depends(get_db)):
             camera.last_online_at = datetime.datetime.utcnow()
         db.commit()
         return {"status": status_str}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/cameras/{camera_id}")
+async def delete_camera(camera_id: int, db: Session = Depends(get_db)):
+    camera = db.query(models.Camera).filter_by(id=camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    try:
+        db.delete(camera)
+        db.commit()
+        return {"message": "Camera deleted"}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

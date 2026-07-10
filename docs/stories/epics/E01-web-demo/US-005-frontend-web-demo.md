@@ -52,6 +52,11 @@ Xây dựng giao diện Web Dashboard (React + TypeScript) cho phép người d�
 
 ## Evidence
 
+2026-07-10 browser usability pass added a personal-settings drawer (theme,
+density, reduced motion), header API connectivity status, member search and
+role/status filters, and an in-app irreversible-delete confirmation. The
+existing browser test suite passed: 9 files / 40 tests.
+
 - 2026-07-06 UI polish pass:
   - Updated the Vite browser UI across `surfaces/browser/index.html`,
     `surfaces/browser/src/App.tsx`, `surfaces/browser/src/index.css`, package
