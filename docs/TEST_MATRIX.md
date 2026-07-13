@@ -41,7 +41,8 @@ it synchronized when story proof changes.
 | US-014 | Enhanced analytics with known-unknown breakdown | no | yes | no | yes | implemented | Story packet proof; Vietnam UTC+7 hourly aggregation and chart contract documented; timezone smoke proof passed |
 | US-015 | E2E dashboard smoke and demo runbook | no | yes | yes | yes | implemented | `npm --prefix surfaces/browser run test:e2e` passed on 2026-07-06 |
 | US-016 | Demo seed data for real-backend dashboard demo | no | yes | no | yes | implemented | `.\.venv\Scripts\python.exe scripts\validate_demo_seed.py` passed against PostgreSQL/pgvector via repo `.env` on 2026-07-07 |
-| US-017 | One-command local dev stack | no | no | no | no | in_progress | Launcher added; full proof blocked because Docker Desktop did not make the Docker engine ready within 150 seconds in this environment |
+| US-017 | One-command local dev stack | no | no | no | yes | implemented | `validate_dev_stack.ps1 -NoInstall` passed on 2026-07-13: backend healthy, frontend HTTP 200, 4 seeded sessions |
+| E05 | Privacy and retention hardening | no | yes | no | yes | implemented | `DATABASE_URL=sqlite:///./test_retention.db .venv/Scripts/python.exe scripts/validate_retention.py` passes 16 checks; `pytest tests/` 170/170 pass; `python scripts/validate_retention.py` (default PostgreSQL) passes 16 checks on 2026-07-13 |
 
 ## Evidence Rules
 
@@ -60,6 +61,6 @@ it synchronized when story proof changes.
 - US-015 records browser E2E smoke proof for the dashboard workflow.
 - US-016 records repeatable real-backend demo seed proof for camera, persons,
   sessions, and analytics data.
-- US-017 adds the one-command local dev stack launcher, but live-stack proof is
-  blocked until Docker Desktop is running successfully on the machine.
-- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 16 stories on 2026-07-07 before US-017 was added.
+- US-017 platform proof: `validate_dev_stack.ps1 -NoInstall` passes with Docker Desktop running and fresh PG17 volumes.
+- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 16 stories on 2026-07-07; US-017 fixed and proven on 2026-07-13 (now 17 implemented).
+- E05 Privacy and retention hardening added on 2026-07-13: `app/retention.py` engine, 7 phases, dry-run, audit logging, CLI + API, SQLite proof passes 16 checks, 170/170 backend tests pass; PostgreSQL proof passes 16 checks on 2026-07-13 (`validate_retention.py` default Postgres).

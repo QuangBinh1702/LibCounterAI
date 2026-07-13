@@ -65,6 +65,11 @@ UNKNOWN_EXPIRED_GRACE_HOURS = int(os.getenv("UNKNOWN_EXPIRED_GRACE_HOURS", "72")
 RETENTION_CLEANUP_INTERVAL_SECONDS = int(os.getenv("RETENTION_CLEANUP_INTERVAL_SECONDS", "3600"))
 AUDIT_LOG_ENABLED = os.getenv("AUDIT_LOG_ENABLED", "true").lower() == "true"
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
+RETENTION_EVENT_DAYS = int(os.getenv("RETENTION_EVENT_DAYS", "365"))
+RETENTION_SESSION_DAYS = int(os.getenv("RETENTION_SESSION_DAYS", "365"))
+RETENTION_UNKNOWN_PURGE_DAYS = int(os.getenv("RETENTION_UNKNOWN_PURGE_DAYS", "30"))
+RETENTION_TEMPLATE_GRACE_DAYS = int(os.getenv("RETENTION_TEMPLATE_GRACE_DAYS", "90"))
+RETENTION_AUDIT_LOG_DAYS = int(os.getenv("RETENTION_AUDIT_LOG_DAYS", "730"))
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
 ALLOWED_PERSON_ROLES = {"STUDENT", "FACULTY", "STAFF", "GUEST"}
@@ -390,18 +395,16 @@ def _purge_expired_embeddings(db: Session, now: datetime.datetime) -> int:
 
 
 def _retention_cleanup():
+    from retention import run_retention as _run_retention
     from database import SessionLocal
     global _retention_running
     _retention_running = True
-    log_info("Retention cleanup worker started")
+    log_info("Retention cleanup worker started (app.retention)")
     while _retention_running:
         try:
             db = SessionLocal()
             try:
-                now = utc_now()
-                _close_expired_sessions(db, now)
-                _expire_unknown_identities(db, now)
-                _purge_expired_embeddings(db, now)
+                _run_retention(db, now=utc_now())
             finally:
                 db.close()
         except Exception as e:
@@ -1461,20 +1464,49 @@ async def get_expired_unknowns(
     )
 
 
-@app.post("/api/admin/retention/cleanup")
-async def trigger_retention_cleanup(
+@app.post("/api/admin/retention/run")
+async def trigger_retention_run(
     db: Session = Depends(get_db),
     _admin: models.User = Depends(require_admin),
 ):
+    from retention import run_retention as _run_retention
     now = utc_now()
-    closed = _close_expired_sessions(db, now)
-    expired = _expire_unknown_identities(db, now)
-    purged = _purge_expired_embeddings(db, now)
+    results = _run_retention(db, now=now)
     return {
-        "closed_sessions": closed,
-        "expired_identities": expired,
-        "purged_embeddings": purged,
+        "phases": results,
+        "duration_ms": sum(r["duration_ms"] for r in results),
         "timestamp": now.isoformat(),
+    }
+
+
+@app.get("/api/admin/retention/config")
+async def get_retention_config(
+    _admin: models.User = Depends(require_admin),
+):
+    return {
+        "unknown_identity_expire_hours": UNKNOWN_IDENTITY_EXPIRE_HOURS,
+        "unknown_expired_grace_hours": UNKNOWN_EXPIRED_GRACE_HOURS,
+        "retention_cleanup_interval_seconds": RETENTION_CLEANUP_INTERVAL_SECONDS,
+        "audit_log_enabled": AUDIT_LOG_ENABLED,
+        "event_days": RETENTION_EVENT_DAYS,
+        "session_days": RETENTION_SESSION_DAYS,
+        "unknown_purge_days": RETENTION_UNKNOWN_PURGE_DAYS,
+        "template_grace_days": RETENTION_TEMPLATE_GRACE_DAYS,
+        "audit_log_days": RETENTION_AUDIT_LOG_DAYS,
+    }
+
+
+@app.get("/api/admin/retention/status")
+async def get_retention_status(
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+):
+    from retention import count_pending, read_config
+    cfg = read_config()
+    counts = count_pending(db)
+    return {
+        "config": cfg,
+        "counts": counts,
     }
 
 

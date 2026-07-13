@@ -137,12 +137,12 @@ add pagination, and introduce tracker/session eviction.
 The current application is demo-oriented. Before production or shared network
 deployment, treat these as required stories:
 
-- Add authentication and role-based authorization for staff/admin workflows.
+- Add authentication and role-based authorization for staff/admin workflows. (Implemented: JWT auth, `require_admin`/`require_staff` dependencies in `app/auth.py`.)
 - Restrict CORS to configured dashboard origins.
 - Validate upload content type, file size, image dimensions, and camera source
   URLs.
 - Add request timeouts for camera/RTSP probing.
-- Define biometric retention for known templates and unknown identities.
+- Define biometric retention for known templates and unknown identities. (2026-07-13: retention engine implemented in `app/retention.py` with 7 phases, env-var config, audit trail, and on-demand API trigger.)
 - Avoid returning internal exception strings in API responses.
 - Replace `print` logging with structured logs that do not expose sensitive
   paths, URLs, or biometric pipeline details.

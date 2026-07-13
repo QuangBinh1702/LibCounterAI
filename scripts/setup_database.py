@@ -50,12 +50,11 @@ def demo_vector(seed: float) -> list[float]:
 
 
 def noon_today_utc() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc).replace(
-        hour=12,
-        minute=0,
-        second=0,
-        microsecond=0,
+    vn_tz = datetime.timezone(datetime.timedelta(hours=7))
+    vn_noon = datetime.datetime.now(vn_tz).replace(
+        hour=12, minute=0, second=0, microsecond=0,
     )
+    return vn_noon.astimezone(datetime.timezone.utc)
 
 
 def ensure_demo_camera(db):
@@ -356,8 +355,20 @@ def seed_demo_data() -> None:
             confidence_avg=0.9,
         )
 
+        for idx, (action, entity_type, detail) in enumerate([
+            ("retention_purge", "expire_unknowns", {"rows_affected": 3, "dry_run": False}),
+            ("retention_purge", "purge_events", {"rows_affected": 42, "dry_run": False}),
+            ("staff_enroll", "persons", {"person_name": "Nguyen Minh Demo"}),
+        ]):
+            db.add(models.AuditLog(
+                action=action,
+                entity_type=entity_type,
+                actor="SYSTEM",
+                details=detail,
+                created_at=now - datetime.timedelta(hours=1, minutes=idx * 15),
+            ))
         db.commit()
-        print("Demo seed data is ready: 1 camera, 2 persons, 1 unknown identity, 6 events, 4 sessions.")
+        print("Demo seed data is ready: 1 camera, 2 persons, 1 unknown identity, 6 events, 4 sessions, 3 audit log entries.")
     except Exception:
         db.rollback()
         raise

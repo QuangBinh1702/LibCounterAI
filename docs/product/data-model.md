@@ -157,3 +157,24 @@ CREATE TABLE visit_sessions (
 );
 CREATE INDEX idx_sessions_active ON visit_sessions(status) WHERE status = 'ACTIVE';
 ```
+
+## 3. Bảng nhật ký kiểm toán
+
+### 3.1. Bảng `audit_logs` (Nhật ký kiểm toán)
+
+Lưu vết tất cả hành động liên quan đến bảo mật, quyền riêng tư và vòng đời dữ liệu.
+
+```sql
+CREATE TABLE audit_logs (
+    id SERIAL PRIMARY KEY,
+    action VARCHAR(50) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    entity_id INTEGER,
+    actor VARCHAR(100),
+    details JSON,
+    ip_address VARCHAR(45),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX ON audit_logs(action, created_at);
+CREATE INDEX ON audit_logs(entity_type, entity_id);
+```

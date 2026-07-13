@@ -75,3 +75,14 @@ def require_admin(user: Annotated[models.User, Depends(require_user)]) -> models
             detail="Admin role required",
         )
     return user
+
+
+ALLOWED_STAFF_ROLES = {"ADMIN", "LIBRARIAN"}
+
+def require_staff(user: Annotated[models.User, Depends(require_user)]) -> models.User:
+    if user.role not in ALLOWED_STAFF_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Staff role required",
+        )
+    return user

@@ -190,12 +190,10 @@ def test_retention_thread_start_stop():
     assert _retention_running is False
 
 
-@patch("main._close_expired_sessions")
-@patch("main._expire_unknown_identities")
-@patch("main._purge_expired_embeddings")
+@patch("retention.run_retention")
 @patch("main.utc_now")
-def test_retention_cleanup_worker_calls_all_steps(
-    mock_now, mock_purge, mock_expire, mock_close,
+def test_retention_cleanup_worker_calls_retention(
+    mock_now, mock_run_retention,
 ):
     import threading
     from main import _retention_cleanup, stop_retention_cleanup, _retention_running
@@ -211,6 +209,4 @@ def test_retention_cleanup_worker_calls_all_steps(
         _retention_running = False
         t.join(timeout=3)
 
-    mock_close.assert_called()
-    mock_expire.assert_called()
-    mock_purge.assert_called()
+    mock_run_retention.assert_called()
