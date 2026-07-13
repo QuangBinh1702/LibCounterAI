@@ -1020,6 +1020,46 @@ async def get_persons(
         total=total,
     )
 
+@app.get("/api/persons/{person_id}")
+async def get_person(person_id: int, db: Session = Depends(get_db)):
+    person = db.query(models.Person).filter_by(id=person_id).first()
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+
+    templates = [
+        {
+            "id": t.id,
+            "model_name": t.model_name,
+            "quality_score": t.quality_score,
+            "source_type": t.source_type,
+            "is_active": t.is_active,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        }
+        for t in person.face_templates
+    ]
+
+    sessions = [
+        {
+            "id": s.id,
+            "entry_at": s.entry_at.isoformat() if s.entry_at else None,
+            "exit_at": s.exit_at.isoformat() if s.exit_at else None,
+            "duration_seconds": s.duration_seconds,
+            "status": s.status,
+        }
+        for s in sorted(person.visit_sessions, key=lambda x: x.entry_at or datetime.datetime.min, reverse=True)[:20]
+    ]
+
+    return {
+        "id": person.id,
+        "full_name": person.full_name,
+        "member_code": person.member_code,
+        "role": person.role,
+        "status": person.status,
+        "created_at": person.created_at.isoformat() if person.created_at else None,
+        "face_templates": templates,
+        "recent_sessions": sessions,
+    }
+
 @app.delete("/api/persons/{person_id}")
 async def delete_person(person_id: int, db: Session = Depends(get_db)):
     person = db.query(models.Person).filter_by(id=person_id).first()

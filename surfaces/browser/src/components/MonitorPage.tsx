@@ -125,6 +125,19 @@ export function MonitorPage() {
     clearOverlayCanvas();
   }, [lineConfig, sourceType, showLine]);
 
+useEffect(() => {
+  return () => {
+    isRunningRef.current = false;
+    if (loopTimeoutRef.current !== null) {
+      clearTimeout(loopTimeoutRef.current);
+      loopTimeoutRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+  };
+}, []);
   const loadCameras = async () => {
     try {
       const res = await fetch(`${apiUrlFn('/api/cameras')}`);

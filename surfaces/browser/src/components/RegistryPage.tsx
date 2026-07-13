@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { MagnifyingGlass, UserPlus, Users, Pencil, Warning, X } from '@phosphor-icons/react';
+import { MagnifyingGlass, UserPlus, Users, Pencil, Warning, X, Eye, CalendarBlank, ShieldCheck } from '@phosphor-icons/react';
 import { useAuth } from '../hooks/useAuth';
 import { useToast } from '../hooks/useToast';
 import { SkeletonRows } from './Skeleton';
@@ -13,6 +13,34 @@ interface Person {
   member_code: string;
   role: string;
   status: string;
+}
+
+interface FaceTemplateInfo {
+  id: number;
+  model_name: string;
+  quality_score: number;
+  source_type: string;
+  is_active: boolean;
+  created_at: string | null;
+}
+
+interface SessionInfo {
+  id: number;
+  entry_at: string | null;
+  exit_at: string | null;
+  duration_seconds: number | null;
+  status: string;
+}
+
+interface PersonDetail {
+  id: number;
+  full_name: string;
+  member_code: string;
+  role: string;
+  status: string;
+  created_at: string | null;
+  face_templates: FaceTemplateInfo[];
+  recent_sessions: SessionInfo[];
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -42,6 +70,7 @@ export function RegistryPage() {
   const [roleFilter, setRoleFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [personToDelete, setPersonToDelete] = useState<Person | null>(null);
+  const [detailPerson, setDetailPerson] = useState<PersonDetail | null>(null);
   const editNameInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => { loadPersons(); }, []);
@@ -59,6 +88,19 @@ export function RegistryPage() {
       showToast('Không tải được danh sách thành viên.', 'error');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadPersonDetail = async (id: number) => {
+    try {
+      const res = await apiFetch(`/api/persons/${id}`);
+      if (res.ok) {
+        setDetailPerson(await res.json());
+      } else {
+        showToast('Không tải được thông tin thành viên.', 'error');
+      }
+    } catch {
+      showToast('Lỗi kết nối.', 'error');
     }
   };
 
@@ -251,7 +293,7 @@ export function RegistryPage() {
                   visiblePersons.map((p) => (
                     <tr key={p.id}>
                       <td className="mono">{p.id}</td>
-                      <td className="cell-strong">{p.full_name}</td>
+                      <td><span className="cell-strong person-name-link" onClick={() => loadPersonDetail(p.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && loadPersonDetail(p.id)}>{p.full_name} <Eye size={12} className="person-name-icon" /></span></td>
                       <td className="mono">{p.member_code}</td>
                       <td>{ROLE_LABELS[p.role] || p.role}</td>
                       <td>
@@ -261,7 +303,7 @@ export function RegistryPage() {
                       </td>
                       <td>
                         <div style={{ display: 'flex', gap: '8px' }}>
-                          <button type="button" className="btn btn-sm" onClick={() => startEditPerson(p)}>Sửa</button>
+                          <button type="button" className="btn btn-sm" onClick={() => startEditPerson(p)}><Pencil {...{ size: 14, weight: 'regular' }} /> Sửa</button>
                           <button type="button" className="btn btn-danger btn-sm" onClick={() => setPersonToDelete(p)}>Xóa</button>
                         </div>
                       </td>
@@ -328,6 +370,75 @@ export function RegistryPage() {
             <h3 id="delete-member-title">Xóa {personToDelete.full_name}?</h3>
             <p>Thành viên và dữ liệu sinh trắc học liên quan sẽ bị xóa vĩnh viễn. Thao tác này không thể hoàn tác.</p>
             <div className="confirm-dialog-actions"><button type="button" className="btn btn-ghost" onClick={() => setPersonToDelete(null)}>Hủy</button><button type="button" className="btn btn-danger" onClick={handleDeletePerson}>Xóa thành viên</button></div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      {detailPerson && createPortal(
+        <div className="modal-overlay" role="presentation" onMouseDown={() => setDetailPerson(null)}>
+          <div className="modal-container" role="dialog" aria-modal="true" aria-labelledby="detail-member-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3 id="detail-member-title" className="modal-title"><Eye {...ICON} /> {detailPerson.full_name}</h3>
+              <button type="button" className="modal-close-btn" aria-label="Đóng" onClick={() => setDetailPerson(null)}><X size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="detail-grid">
+                <div className="detail-section">
+                  <h4 className="detail-section-title"><Users {...ICON} /> Thông tin</h4>
+                  <div className="detail-rows">
+                    <div className="detail-row"><span className="detail-label">Mã thẻ</span><span className="detail-value mono">{detailPerson.member_code}</span></div>
+                    <div className="detail-row"><span className="detail-label">Vai trò</span><span className="detail-value">{ROLE_LABELS[detailPerson.role] || detailPerson.role}</span></div>
+                    <div className="detail-row"><span className="detail-label">Trạng thái</span><span className={`badge ${detailPerson.status === 'ACTIVE' ? 'success' : 'danger'}`}>{detailPerson.status === 'ACTIVE' ? 'Hoạt động' : 'Ngưng'}</span></div>
+                    <div className="detail-row"><span className="detail-label">Ngày tạo</span><span className="detail-value">{detailPerson.created_at ? new Date(detailPerson.created_at).toLocaleDateString('vi-VN') : '-'}</span></div>
+                  </div>
+                </div>
+                <div className="detail-section">
+                  <h4 className="detail-section-title"><ShieldCheck {...ICON} /> Khuôn mặt ({detailPerson.face_templates.length})</h4>
+                  {detailPerson.face_templates.length === 0 ? (
+                    <p className="detail-empty">Chưa có mẫu khuôn mặt</p>
+                  ) : (
+                    <div className="detail-rows">
+                      {detailPerson.face_templates.map((t) => (
+                        <div key={t.id} className="detail-row">
+                          <span className="detail-label">{t.model_name}</span>
+                          <span className="detail-value">
+                            <span className={`badge ${t.is_active ? 'success' : ''}`}>{t.is_active ? 'Hoạt động' : 'Vô hiệu'}</span>
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{(t.quality_score * 100).toFixed(0)}%</span>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="detail-section detail-section--full">
+                  <h4 className="detail-section-title"><CalendarBlank {...ICON} /> Lịch sử ra/vào (20 gần nhất)</h4>
+                  {detailPerson.recent_sessions.length === 0 ? (
+                    <p className="detail-empty">Chưa có phiên ra/vào</p>
+                  ) : (
+                    <table className="admin-table admin-table--compact">
+                      <thead>
+                        <tr>
+                          <th>Vào</th>
+                          <th>Ra</th>
+                          <th>Thời lượng</th>
+                          <th>Trạng thái</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detailPerson.recent_sessions.map((s) => (
+                          <tr key={s.id}>
+                            <td className="mono muted">{s.entry_at ? new Date(s.entry_at).toLocaleString('vi-VN') : '-'}</td>
+                            <td className="mono muted">{s.exit_at ? new Date(s.exit_at).toLocaleString('vi-VN') : '-'}</td>
+                            <td className="mono">{s.duration_seconds ? `${Math.floor(s.duration_seconds / 60)}p` : '-'}</td>
+                            <td><span className={`badge ${s.status === 'CLOSED' ? 'success' : s.status === 'ACTIVE' ? 'warning' : ''}`}>{s.status === 'CLOSED' ? 'Đã đóng' : s.status === 'ACTIVE' ? 'Đang mở' : s.status === 'TIMEOUT' ? 'Quá hạn' : s.status}</span></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>,
         document.body,
