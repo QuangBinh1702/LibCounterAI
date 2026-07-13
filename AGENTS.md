@@ -25,3 +25,10 @@ step that could use an external tool, run `scripts/bin/harness-cli query tools
 --capability <name> --status present` to see what is equipped; an absent
 capability is a clean skip.
 <!-- HARNESS:END -->
+
+## Commit Convention
+
+**1 feature = 1 commit.** Sau mỗi feature hoàn chỉnh, tôi sẽ đề xuất commit
+gom tất cả file liên quan (code + test + docs + story packet + evidence) vào
+chung 1 commit. Không tách code, docs, tests thành nhiều commit riêng cho cùng
+1 feature. Timestamp luôn kèm trong commit message (VD: `2026-07-13`).
