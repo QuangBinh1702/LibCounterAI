@@ -51,7 +51,7 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 export function RegistryPage() {
-  const { apiFetch } = useAuth();
+  const { apiFetch, isAdmin } = useAuth();
   const { show: showToast } = useToast();
 
   const [persons, setPersons] = useState<Person[]>([]);
@@ -303,11 +303,11 @@ export function RegistryPage() {
                       </td>
                       <td>
                         <div style={{ display: 'flex', gap: '8px' }}>
-                          <button type="button" className="btn btn-sm" onClick={() => startEditPerson(p)}><Pencil {...{ size: 14, weight: 'regular' }} /> Sửa</button>
-                          <button type="button" className="btn btn-danger btn-sm" onClick={() => setPersonToDelete(p)}>Xóa</button>
-                        </div>
-                      </td>
-                    </tr>
+                          {isAdmin && <button type="button" className="btn btn-sm" onClick={() => startEditPerson(p)}><Pencil {...{ size: 14, weight: 'regular' }} /> Sửa</button>}
+                          {isAdmin && <button type="button" className="btn btn-danger btn-sm" onClick={() => setPersonToDelete(p)}>Xóa</button>}
+                         </div>
+                       </td>
+                     </tr>
                   ))
                 )}
               </tbody>

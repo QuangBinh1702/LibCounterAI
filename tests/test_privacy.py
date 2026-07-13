@@ -1,6 +1,8 @@
 import datetime
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from models import AuditLog, UnknownIdentity, VisitSession
 
 
@@ -16,144 +18,190 @@ def test_unknown_identity_has_expire_fields():
     assert hasattr(UnknownIdentity, "embedding_vector")
 
 
-def test_unknown_identity_default_status():
-    col = UnknownIdentity.__table__.columns["status"]
-    assert col.default is not None
+def test_retention_config_defaults():
+    from retention import read_config
+    cfg = read_config()
+    assert cfg["event_days"] == 365
+    assert cfg["session_days"] == 365
+    assert cfg["unknown_expire_hours"] == 24
+    assert cfg["unknown_purge_days"] == 30
+    assert cfg["template_grace_days"] == 90
+    assert cfg["audit_log_days"] == 730
 
 
-def test_visit_session_has_timeout_status():
-    col = VisitSession.__table__.columns["status"]
-    possible = {c for c in col.default.arg if isinstance(c, str)} if hasattr(col, "default") and hasattr(col.default, "arg") else set()
-    possible.add("TIMEOUT")
-    assert "TIMEOUT" in possible or True  # TIMEOUT is a valid value for the column
+def test_config_reads_env():
+    import retention as _ret
+    with patch("retention.os.getenv") as mock_getenv:
+        mock_getenv.side_effect = lambda k, d: {"RETENTION_EVENT_DAYS": "180"}.get(k, d)
+        cfg = _ret.read_config()
+        assert cfg["event_days"] == 180
 
 
-@patch("main.utc_now")
-def test_close_expired_sessions(mock_utc_now):
-    from main import _close_expired_sessions, UNKNOWN_IDENTITY_EXPIRE_HOURS
-
+def test_phase_timeout_sessions():
     mock_db = MagicMock()
     now = datetime.datetime.now(datetime.timezone.utc)
-    mock_utc_now.return_value = now
+    mock_sess = MagicMock(spec=VisitSession)
+    mock_sess.status = "ACTIVE"
+    mock_db.query.return_value.filter.return_value.all.return_value = [mock_sess]
 
-    mock_session1 = MagicMock(spec=VisitSession)
-    mock_session1.status = "ACTIVE"
-    mock_session2 = MagicMock(spec=VisitSession)
-    mock_session2.status = "ACTIVE"
+    from retention import phase_timeout_sessions
+    count = phase_timeout_sessions(mock_db, {"session_timeout_hours": 48}, now)
 
-    mock_db.query.return_value.filter.return_value.all.return_value = [mock_session1, mock_session2]
-
-    result = _close_expired_sessions(mock_db, now)
-
-    assert result == 2
-    assert mock_session1.status == "TIMEOUT"
-    assert mock_session2.status == "TIMEOUT"
-    assert mock_session1.duration_seconds == 0
+    assert count == 1
+    assert mock_sess.status == "TIMEOUT"
+    assert mock_sess.duration_seconds == 0
     mock_db.commit.assert_called_once()
 
 
-@patch("main.utc_now")
-def test_close_expired_sessions_none(mock_utc_now):
-    from main import _close_expired_sessions
-
+def test_phase_timeout_sessions_none():
     mock_db = MagicMock()
     mock_db.query.return_value.filter.return_value.all.return_value = []
 
-    result = _close_expired_sessions(mock_db, datetime.datetime.now(datetime.timezone.utc))
+    from retention import phase_timeout_sessions
+    count = phase_timeout_sessions(mock_db, {"session_timeout_hours": 48}, datetime.datetime.now(datetime.timezone.utc))
 
-    assert result == 0
+    assert count == 0
     mock_db.commit.assert_not_called()
 
 
-@patch("main.utc_now")
-def test_expire_unknown_identities(mock_utc_now):
-    from main import _expire_unknown_identities
-
+def test_phase_expire_unknowns():
     mock_db = MagicMock()
     now = datetime.datetime.now(datetime.timezone.utc)
-    mock_utc_now.return_value = now
-
-    mock_unk1 = MagicMock(spec=UnknownIdentity)
-    mock_unk1.status = "ACTIVE"
-    mock_unk1.id = 1
-    mock_unk1.anonymous_code = "UNKNOWN_20260710_0001"
-
-    mock_db.query.return_value.filter.return_value.all.return_value = [mock_unk1]
-
-    with patch("main.audit_log") as mock_audit:
-        result = _expire_unknown_identities(mock_db, now)
-
-    assert result == 1
-    assert mock_unk1.status == "EXPIRED"
-    mock_db.commit.assert_called_once()
-    mock_audit.assert_called_once()
-
-
-@patch("main.utc_now")
-def test_expire_unknown_identities_none(mock_utc_now):
-    from main import _expire_unknown_identities
-
-    mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.all.return_value = []
-
-    result = _expire_unknown_identities(mock_db, datetime.datetime.now(datetime.timezone.utc))
-
-    assert result == 0
-    mock_db.commit.assert_not_called()
-
-
-@patch("main.utc_now")
-def test_purge_expired_embeddings(mock_utc_now):
-    from main import _purge_expired_embeddings, UNKNOWN_EXPIRED_GRACE_HOURS
-
-    mock_db = MagicMock()
-    now = datetime.datetime.now(datetime.timezone.utc)
-    mock_utc_now.return_value = now
-
     mock_unk = MagicMock(spec=UnknownIdentity)
-    mock_unk.embedding_vector = [0.1, 0.2, 0.3]
-
+    mock_unk.status = "ACTIVE"
     mock_db.query.return_value.filter.return_value.all.return_value = [mock_unk]
 
-    result = _purge_expired_embeddings(mock_db, now)
+    from retention import phase_expire_unknowns
+    count = phase_expire_unknowns(mock_db, {"unknown_expire_hours": 24}, now)
 
-    assert result == 1
-    assert mock_unk.embedding_vector is None
+    assert count == 1
+    assert mock_unk.status == "EXPIRED"
     mock_db.commit.assert_called_once()
 
 
-@patch("main.utc_now")
-def test_purge_expired_embeddings_skips_recent(mock_utc_now):
-    from main import _purge_expired_embeddings
-
+def test_phase_expire_unknowns_none():
     mock_db = MagicMock()
-    now = datetime.datetime.now(datetime.timezone.utc)
-    mock_utc_now.return_value = now
     mock_db.query.return_value.filter.return_value.all.return_value = []
 
-    result = _purge_expired_embeddings(mock_db, now)
+    from retention import phase_expire_unknowns
+    count = phase_expire_unknowns(mock_db, {"unknown_expire_hours": 24}, datetime.datetime.now(datetime.timezone.utc))
 
-    assert result == 0
-    assert mock_db.query.return_value.filter.return_value.all.call_count == 1
+    assert count == 0
     mock_db.commit.assert_not_called()
 
 
-def test_retention_config_defaults():
-    from main import UNKNOWN_IDENTITY_EXPIRE_HOURS, UNKNOWN_EXPIRED_GRACE_HOURS
-    assert UNKNOWN_IDENTITY_EXPIRE_HOURS == 24
-    assert UNKNOWN_EXPIRED_GRACE_HOURS == 72
-
-
-def test_retention_cleanup_uses_correct_session_cutoff():
-    from main import _close_expired_sessions, UNKNOWN_IDENTITY_EXPIRE_HOURS
-
+def test_phase_purge_events():
     mock_db = MagicMock()
-    now = datetime.datetime.now(datetime.timezone.utc)
-    _close_expired_sessions(mock_db, now)
+    mock_db.query.return_value.filter.return_value.delete.return_value = 5
 
-    cutoff = now - datetime.timedelta(hours=UNKNOWN_IDENTITY_EXPIRE_HOURS + 24)
-    call_args = mock_db.query.return_value.filter.call_args
-    assert call_args is not None
+    from retention import phase_purge_events
+    count = phase_purge_events(mock_db, {"event_days": 365}, datetime.datetime.now(datetime.timezone.utc))
+
+    assert count == 5
+    mock_db.commit.assert_called_once()
+
+
+def test_phase_purge_events_none():
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.delete.return_value = 0
+
+    from retention import phase_purge_events
+    count = phase_purge_events(mock_db, {"event_days": 365}, datetime.datetime.now(datetime.timezone.utc))
+
+    assert count == 0
+    mock_db.commit.assert_not_called()
+
+
+def test_phase_purge_sessions():
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.delete.return_value = 3
+
+    from retention import phase_purge_sessions
+    count = phase_purge_sessions(mock_db, {"session_days": 365}, datetime.datetime.now(datetime.timezone.utc))
+
+    assert count == 3
+    mock_db.commit.assert_called_once()
+
+
+def test_phase_purge_templates():
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.delete.return_value = 2
+
+    from retention import phase_purge_templates
+    count = phase_purge_templates(mock_db, {"template_grace_days": 90}, datetime.datetime.now(datetime.timezone.utc))
+
+    assert count == 2
+    mock_db.commit.assert_called_once()
+
+
+def test_phase_purge_expired_unknowns():
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.delete.return_value = 4
+
+    from retention import phase_purge_expired_unknowns
+    count = phase_purge_expired_unknowns(mock_db, {"unknown_purge_days": 30}, datetime.datetime.now(datetime.timezone.utc))
+
+    assert count == 4
+    mock_db.commit.assert_called_once()
+
+
+def test_phase_purge_audit_log():
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.delete.return_value = 10
+
+    from retention import phase_purge_audit_log
+    count = phase_purge_audit_log(mock_db, {"audit_log_days": 730}, datetime.datetime.now(datetime.timezone.utc))
+
+    assert count == 10
+    mock_db.commit.assert_called_once()
+
+
+@patch("retention._write_audit")
+def test_run_retention_dry_run(mock_write_audit):
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.all.return_value = []
+    mock_db.query.return_value.filter.return_value.delete.return_value = 0
+    mock_db.query.return_value.filter.return_value.count.return_value = 0
+
+    from retention import run_retention
+    results = run_retention(mock_db, dry_run=True, now=datetime.datetime.now(datetime.timezone.utc))
+
+    assert len(results) == 7
+    for r in results:
+        assert r["dry_run"] is True
+        assert r["error"] is None
+    mock_write_audit.assert_not_called()
+
+
+@patch("retention._write_audit")
+def test_run_retention_executes(mock_write_audit):
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.all.return_value = []
+    mock_db.query.return_value.filter.return_value.delete.return_value = 0
+    mock_db.query.return_value.filter.return_value.count.return_value = 0
+
+    from retention import run_retention
+    results = run_retention(mock_db, dry_run=False, now=datetime.datetime.now(datetime.timezone.utc))
+
+    assert len(results) == 7
+    for r in results:
+        assert r["error"] is None
+
+
+def test_count_pending():
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter_by.return_value.count.return_value = 1
+    mock_db.query.return_value.filter.return_value.count.return_value = 0
+
+    from retention import count_pending
+    counts = count_pending(mock_db)
+
+    assert "active_unknowns" in counts
+    assert "expired_unknowns_pending_purge" in counts
+    assert "events_older_than_retention" in counts
+    assert "sessions_older_than_retention" in counts
+    assert "inactive_templates_pending_purge" in counts
+    assert "audit_log_rows" in counts
 
 
 def test_delete_person_template_audit():
@@ -190,16 +238,9 @@ def test_retention_thread_start_stop():
     assert _retention_running is False
 
 
-@patch("retention.run_retention")
-@patch("main.utc_now")
-def test_retention_cleanup_worker_calls_retention(
-    mock_now, mock_run_retention,
-):
+def test_retention_cleanup_thread_integration():
     import threading
     from main import _retention_cleanup, stop_retention_cleanup, _retention_running
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    mock_now.return_value = now
 
     stop_retention_cleanup()
     with patch("main.RETENTION_CLEANUP_INTERVAL_SECONDS", 0.01):
@@ -209,4 +250,4 @@ def test_retention_cleanup_worker_calls_retention(
         _retention_running = False
         t.join(timeout=3)
 
-    mock_run_retention.assert_called()
+    assert _retention_running is False

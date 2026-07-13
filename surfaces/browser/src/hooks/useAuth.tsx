@@ -12,6 +12,7 @@ interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isAdmin: boolean;
+  isStaff: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => void;
   apiUrl: string;
@@ -37,6 +38,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const isAuthenticated = !!token && !!user;
   const isAdmin = user?.role === 'ADMIN';
+  const isStaff = user?.role === 'ADMIN' || user?.role === 'LIBRARIAN';
 
   const setApiUrl = useCallback((url: string) => {
     setApiUrlState(url);
@@ -56,7 +58,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers['Content-Type'] = 'application/json';
         opts.headers = headers as HeadersInit;
       }
-      return fetch(`${base}${suffix}`, opts);
+      return fetch(`${base}${suffix}`, opts).then((res) => {
+        if (res.status === 401) {
+          logout();
+        } else if (res.status === 403) {
+          window.dispatchEvent(new CustomEvent('auth:forbidden'));
+        }
+        return res;
+      });
     },
     [apiUrl, token],
   );
@@ -107,7 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [token]);
 
   return (
-    <AuthContext.Provider value={{ token, user, isAuthenticated, isAdmin, login, logout, apiUrl, setApiUrl, apiFetch }}>
+    <AuthContext.Provider value={{ token, user, isAuthenticated, isAdmin, isStaff, login, logout, apiUrl, setApiUrl, apiFetch }}>
       {children}
     </AuthContext.Provider>
   );

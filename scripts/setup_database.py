@@ -425,8 +425,11 @@ def main() -> None:
         raise SystemExit("PostgreSQL is required, but the configured database is not PostgreSQL.")
 
     ensure_postgres_vector_support()
-    print("Creating database tables...")
-    Base.metadata.create_all(bind=engine)
+    print("Running database migrations...")
+    from alembic.config import Config
+    from alembic import command
+    alembic_cfg = Config(os.path.join(ROOT_DIR, "alembic.ini"))
+    command.upgrade(alembic_cfg, "head")
     print("Database tables are ready.")
     ensure_postgres_vector_indexes()
 

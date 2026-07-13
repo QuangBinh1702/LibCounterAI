@@ -50,4 +50,4 @@ const child = spawn(
   },
 );
 
-forwardSignals(child);
+// forwardSignals(child); // Bỏ để tránh chết chain khi reload

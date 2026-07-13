@@ -1,7 +1,9 @@
-import { useEffect } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Moon, SlidersHorizontal, Sun, X } from '@phosphor-icons/react';
+import { Check, Key, Moon, SlidersHorizontal, Sun, X } from '@phosphor-icons/react';
 import type { Theme } from '../hooks/useTheme';
+import { useAuth } from '../hooks/useAuth';
+import { useToast } from '../hooks/useToast';
 
 export type Density = 'comfortable' | 'compact';
 
@@ -17,6 +19,36 @@ interface PersonalSettingsProps {
 }
 
 export function PersonalSettings({ open, theme, density, reduceMotion, onClose, onThemeChange, onDensityChange, onReduceMotionChange }: PersonalSettingsProps) {
+  const { apiFetch } = useAuth();
+  const { show: showToast } = useToast();
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwLoading, setPwLoading] = useState(false);
+
+  const handleChangePassword = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pwCurrent || !pwNew || pwNew !== pwConfirm) {
+      showToast('Vui lòng nhập đúng thông tin và xác nhận mật khẩu mới khớp.', 'error');
+      return;
+    }
+    setPwLoading(true);
+    try {
+      const res = await apiFetch('/api/auth/password', {
+        method: 'PUT',
+        body: JSON.stringify({ current_password: pwCurrent, new_password: pwNew }),
+      });
+      if (res.ok) {
+        showToast('Mật khẩu đã được đổi.', 'success');
+        setPwCurrent(''); setPwNew(''); setPwConfirm('');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Đổi mật khẩu thất bại.', 'error');
+      }
+    } catch { showToast('Lỗi kết nối.', 'error'); }
+    finally { setPwLoading(false); }
+  };
+
   useEffect(() => {
     if (!open) return;
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
@@ -62,6 +94,24 @@ export function PersonalSettings({ open, theme, density, reduceMotion, onClose, 
           <section className="settings-section settings-toggle-row">
             <div><h3>Giảm chuyển động</h3><p>Tắt hoặc rút ngắn hiệu ứng chuyển trang, modal và phản hồi nút; phù hợp khi bạn dễ bị phân tán hoặc nhạy cảm với chuyển động.</p></div>
             <button type="button" role="switch" aria-checked={reduceMotion} className={`preference-switch ${reduceMotion ? 'active' : ''}`} onClick={() => onReduceMotionChange(!reduceMotion)}><span /></button>
+          </section>
+          <section className="settings-section" aria-labelledby="password-title">
+            <h3 id="password-title"><Key size={16} /> Đổi mật khẩu</h3>
+            <form onSubmit={handleChangePassword} className="password-change-form">
+              <div className="control-group">
+                <span className="control-label">Mật khẩu hiện tại</span>
+                <input type="password" className="text-input" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} required autoComplete="current-password" />
+              </div>
+              <div className="control-group">
+                <span className="control-label">Mật khẩu mới</span>
+                <input type="password" className="text-input" value={pwNew} onChange={(e) => setPwNew(e.target.value)} required minLength={6} autoComplete="new-password" />
+              </div>
+              <div className="control-group">
+                <span className="control-label">Xác nhận mật khẩu mới</span>
+                <input type="password" className="text-input" value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} required minLength={6} autoComplete="new-password" />
+              </div>
+              <button type="submit" className="btn btn-primary btn-sm" disabled={pwLoading}>{pwLoading ? 'Đang đổi…' : 'Đổi mật khẩu'}</button>
+            </form>
           </section>
         </div>
       </aside>

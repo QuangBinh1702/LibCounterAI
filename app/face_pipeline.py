@@ -22,7 +22,7 @@ class FacePipeline:
         # We cache detector instances for different image shapes
         self.detectors = {}
 
-    def _get_detector(self, width: int, height: int, score_threshold: float = 0.6, nms_threshold: float = 0.3):
+    def _get_detector(self, width: int, height: int, score_threshold: float = 0.65, nms_threshold: float = 0.3):
         key = (width, height, score_threshold, nms_threshold)
         if key not in self.detectors:
             self.detectors[key] = cv2.FaceDetectorYN.create(
@@ -37,7 +37,7 @@ class FacePipeline:
             self.detectors[key].setInputSize((width, height))
         return self.detectors[key]
 
-    def detect_faces(self, img, score_threshold: float = 0.6):
+    def detect_faces(self, img, score_threshold: float = 0.65):
         """
         Detect faces in image.
         Returns:

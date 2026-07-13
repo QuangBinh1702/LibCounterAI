@@ -23,8 +23,10 @@ interface AuditEntry {
 }
 
 interface RetentionConfig {
-  unknown_identity_expire_hours: number;
-  unknown_expired_grace_hours: number;
+  retention: {
+    unknown_expire_hours: number;
+    session_timeout_hours: number;
+  };
   retention_cleanup_interval_seconds: number;
   audit_log_enabled: boolean;
 }
@@ -67,9 +69,10 @@ interface AdminPageProps {
 }
 
 export function AdminPage({ onBack }: AdminPageProps) {
-  const { apiFetch } = useAuth();
+  const { apiFetch, isAdmin } = useAuth();
   const { show: showToast } = useToast();
   const reduceMotion = useReducedMotion();
+  const visibleTabs = SUB_TABS.filter((t) => t.id !== 'users' || isAdmin);
   const [subTab, setSubTab] = useState<SubTab>('users');
 
   const [users, setUsers] = useState<UserItem[]>([]);
@@ -148,11 +151,35 @@ export function AdminPage({ onBack }: AdminPageProps) {
   const triggerCleanup = async () => {
     setCleanupLoading(true); setCleanupResult(null); setConfirmCleanup(false);
     try {
-      const res = await apiFetch('/api/admin/retention/cleanup', { method: 'POST' });
+      const res = await apiFetch('/api/admin/retention/run', { method: 'POST' });
       if (res.ok) { setCleanupResult(await res.json()); showToast('Đã dọn dẹp.', 'success'); }
       else showToast('Dọn dẹp thất bại.', 'error');
     } catch { showToast('Lỗi kết nối.', 'error'); }
     finally { setCleanupLoading(false); }
+  };
+
+  const toggleUserRole = async (u: UserItem) => {
+    const newRole = u.role === 'ADMIN' ? 'LIBRARIAN' : 'ADMIN';
+    try {
+      const res = await apiFetch(`/api/auth/users/${u.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ role: newRole }),
+      });
+      if (res.ok) { showToast(`Đã đổi vai trò ${u.username} thành ${USER_ROLE_LABELS[newRole]}.`, 'success'); loadUsers(); }
+      else { const e = await res.json().catch(() => ({})); showToast(e.detail || 'Thất bại.', 'error'); }
+    } catch { showToast('Lỗi kết nối.', 'error'); }
+  };
+
+  const toggleUserStatus = async (u: UserItem) => {
+    const newStatus = u.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    try {
+      const res = await apiFetch(`/api/auth/users/${u.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (res.ok) { showToast(`Đã ${newStatus === 'ACTIVE' ? 'kích hoạt' : 'vô hiệu hoá'} ${u.username}.`, 'success'); loadUsers(); }
+      else { const e = await res.json().catch(() => ({})); showToast(e.detail || 'Thất bại.', 'error'); }
+    } catch { showToast('Lỗi kết nối.', 'error'); }
   };
 
   useEffect(() => { if (subTab === 'users') loadUsers(); }, [subTab, loadUsers]);
@@ -194,7 +221,7 @@ export function AdminPage({ onBack }: AdminPageProps) {
       </div>
 
       <nav className="admin-segment" role="tablist" aria-label="Phần quản trị">
-        {SUB_TABS.map(({ id, label, Icon }) => (
+        {visibleTabs.map(({ id, label, Icon }) => (
           <button
             key={id}
             role="tab"
@@ -289,6 +316,7 @@ export function AdminPage({ onBack }: AdminPageProps) {
                       <th>Tên đăng nhập</th>
                       <th><Tag {...ICON_SM} /> Vai trò</th>
                       <th>Trạng thái</th>
+                      {isAdmin && <th>Thao tác</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -301,6 +329,16 @@ export function AdminPage({ onBack }: AdminPageProps) {
                           <span className={`status-dot ${u.status === 'ACTIVE' ? 'active' : ''}`} />
                           {USER_STATUS_LABELS[u.status] || u.status}
                         </td>
+                        {isAdmin && (
+                          <td className="admin-actions">
+                            <button type="button" className="btn btn-sm" onClick={() => toggleUserRole(u)} title="Đổi vai trò">
+                              <Tag {...ICON_SM} />
+                            </button>
+                            <button type="button" className={`btn btn-sm ${u.status === 'ACTIVE' ? 'btn-danger' : 'btn-primary'}`} onClick={() => toggleUserStatus(u)} title={u.status === 'ACTIVE' ? 'Vô hiệu hoá' : 'Kích hoạt'}>
+                              {u.status === 'ACTIVE' ? <Warning {...ICON_SM} /> : <ShieldCheck {...ICON_SM} />}
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -435,8 +473,8 @@ export function AdminPage({ onBack }: AdminPageProps) {
             ) : config ? (
               <div className="retention-grid">
                 {[
-                  { label: 'Hết hạn danh tính lạ', value: `${config.unknown_identity_expire_hours} giờ`, icon: Clock },
-                  { label: 'Thời gian gia hạn', value: `${config.unknown_expired_grace_hours} giờ`, icon: Clock },
+                  { label: 'Hết hạn danh tính lạ', value: `${config.retention.unknown_expire_hours} giờ`, icon: Clock },
+                  { label: 'Thời gian gia hạn', value: `${config.retention.session_timeout_hours} giờ`, icon: Clock },
                   { label: 'Chu kỳ dọn dẹp', value: `${config.retention_cleanup_interval_seconds}s`, icon: ArrowClockwise },
                   { label: 'Ghi nhật ký', value: config.audit_log_enabled ? 'Bật' : 'Tắt', icon: Scroll },
                 ].map(({ label, value, icon: Icon }) => (

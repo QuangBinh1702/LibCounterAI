@@ -43,6 +43,7 @@ app/*.sqlite3
 uploads/
 media/
 tmp/
+tmp_*/
 
 # Node / Vite frontend
 node_modules/
@@ -52,6 +53,9 @@ dist-ssr/
 surfaces/browser/dist/
 desktop-dist/
 *.tsbuildinfo
+
+# Backups
+backups/
 
 # Logs and test output
 logs/

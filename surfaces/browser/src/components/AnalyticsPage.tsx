@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { ChartBar } from '@phosphor-icons/react';
 import { useAuth } from '../hooks/useAuth';
 import { useToast } from '../hooks/useToast';
@@ -55,7 +55,6 @@ export function AnalyticsPage() {
     known_visitors_today: 0, unknown_visitors_today: 0, total_sessions_today: 0,
   });
   const [hourlyStats, setHourlyStats] = useState<HourlyStat[]>([]);
-  const [sessionsExport, setSessionsExport] = useState<VisitSession[]>([]);
 
   const reportQuery = () => periodQuery({ from: rangeFrom, to: rangeTo });
   const activeRangeLabel = formatRangeLabel({ from: rangeFrom, to: rangeTo }, periodPreset);

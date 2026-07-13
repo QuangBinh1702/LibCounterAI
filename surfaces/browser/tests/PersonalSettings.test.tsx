@@ -1,7 +1,21 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render as rtlRender, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PersonalSettings } from '../src/components/PersonalSettings'
+import { AuthProvider } from '../src/hooks/useAuth'
+import { ToastProvider } from '../src/hooks/useToast'
+
+function Wrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <AuthProvider>
+      <ToastProvider>{children}</ToastProvider>
+    </AuthProvider>
+  )
+}
+
+function render(ui: React.ReactElement, options = {}) {
+  return rtlRender(ui, { wrapper: Wrapper, ...options })
+}
 
 describe('PersonalSettings', () => {
   const baseProps = {
@@ -16,8 +30,8 @@ describe('PersonalSettings', () => {
   }
 
   it('renders nothing when closed', () => {
-    const { container } = render(<PersonalSettings {...baseProps} open={false} />)
-    expect(container.innerHTML).toBe('')
+    render(<PersonalSettings {...baseProps} open={false} />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('renders dialog when open', () => {

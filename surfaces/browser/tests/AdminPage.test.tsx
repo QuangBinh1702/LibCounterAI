@@ -38,8 +38,10 @@ describe('AdminPage', () => {
         return {
           ok: true,
           json: async () => ({
-            unknown_identity_expire_hours: 24,
-            unknown_expired_grace_hours: 6,
+            retention: {
+              unknown_expire_hours: 24,
+              session_timeout_hours: 48,
+            },
             retention_cleanup_interval_seconds: 3600,
             audit_log_enabled: true,
           }),

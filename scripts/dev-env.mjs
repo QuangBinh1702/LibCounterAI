@@ -51,11 +51,13 @@ export function forwardSignals(child) {
     });
   }
 
+  // NOTE: không gọi process.exit() ở đây vì nó giết luôn
+  // concurrently chain khi uvicorn reload (--reload).
+  // Log thay vì exit để dev script không chết bất ngờ.
   child.on("exit", (code, signal) => {
-    if (signal) {
-      process.kill(process.pid, signal);
-      return;
-    }
-    process.exit(code ?? 0);
+    if (!code && !signal) return;
+    console.warn(
+      `[dev] child exited: code=${code} signal=${signal} (not exiting parent)`,
+    );
   });
 }

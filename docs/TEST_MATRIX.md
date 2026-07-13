@@ -41,8 +41,12 @@ it synchronized when story proof changes.
 | US-014 | Enhanced analytics with known-unknown breakdown | no | yes | no | yes | implemented | Story packet proof; Vietnam UTC+7 hourly aggregation and chart contract documented; timezone smoke proof passed |
 | US-015 | E2E dashboard smoke and demo runbook | no | yes | yes | yes | implemented | `npm --prefix surfaces/browser run test:e2e` passed on 2026-07-06 |
 | US-016 | Demo seed data for real-backend dashboard demo | no | yes | no | yes | implemented | `.\.venv\Scripts\python.exe scripts\validate_demo_seed.py` passed against PostgreSQL/pgvector via repo `.env` on 2026-07-07 |
-| US-017 | One-command local dev stack | no | no | no | yes | implemented | `validate_dev_stack.ps1 -NoInstall` passed on 2026-07-13: backend healthy, frontend HTTP 200, 4 seeded sessions |
+| US-017 | One-command local dev stack | no | yes | no | yes | implemented | `validate_dev_stack.ps1 -NoInstall` passed on 2026-07-13: backend healthy, frontend HTTP 200, 4 seeded sessions |
+| US-018 | Realtime monitor performance and counting responsiveness | yes | yes | no | yes | implemented | Vertical-line fix, detector cadence optimization; `validate_realtime_fast_mode.py`, `validate_crossing.py`, `validate_matching.py` passed; browser build, lint passed on 2026-07-09 |
+| US-019 | Identity continuity for unresolved exit events | no | yes | no | yes | implemented | `validate_identity_continuity.py`, `validate_matching.py`, `validate_realtime_fast_mode.py`, `validate_crossing.py` passed; browser build, lint passed on 2026-07-09 |
+| US-020 | Member update CRUD action on registry page | yes | yes | no | no | implemented | Frontend Vite production build succeeded; portal-based edit dialog with role/status/photo update on 2026-07-10 |
 | E05 | Privacy and retention hardening | no | yes | no | yes | implemented | `DATABASE_URL=sqlite:///./test_retention.db .venv/Scripts/python.exe scripts/validate_retention.py` passes 16 checks; `pytest tests/` 170/170 pass; `python scripts/validate_retention.py` (default PostgreSQL) passes 16 checks on 2026-07-13 |
+| US-021 | Role-based access control (ADMIN / LIBRARIAN) | yes | yes | no | no | implemented | `scripts/validate_auth_roles.py` 17/17 PASS; `pytest tests/test_auth.py test_auth_api.py` 40/40 PASS; `pytest tests/` 219/219 PASS; enrollment quality gate (score >= 0.65) on register + update; `MIN_ENROLLMENT_QUALITY=0.65` env var on 2026-07-13 |
 
 ## Evidence Rules
 
@@ -62,5 +66,6 @@ it synchronized when story proof changes.
 - US-016 records repeatable real-backend demo seed proof for camera, persons,
   sessions, and analytics data.
 - US-017 platform proof: `validate_dev_stack.ps1 -NoInstall` passes with Docker Desktop running and fresh PG17 volumes.
-- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 16 stories on 2026-07-07; US-017 fixed and proven on 2026-07-13 (now 17 implemented).
+- `.\scripts\bin\harness-cli.exe story verify-all` passed for all 16 stories on 2026-07-07; US-017 fixed and proven on 2026-07-13; US-018, US-019, US-020 added on 2026-07-09/10; US-021 and US-E06-ROLE-FIX added on 2026-07-13 (now 25 implemented).
 - E05 Privacy and retention hardening added on 2026-07-13: `app/retention.py` engine, 7 phases, dry-run, audit logging, CLI + API, SQLite proof passes 16 checks, 170/170 backend tests pass; PostgreSQL proof passes 16 checks on 2026-07-13 (`validate_retention.py` default Postgres).
+- US-021 Auth roles complete on 2026-07-13: `scripts/validate_auth_roles.py` 17/17 PASS, `pytest tests/` 219/219 PASS, RegistryPage edit/delete hidden for non-admin, AdminPage tab filtered, 403 toast wired, enrollment quality gate (`MIN_ENROLLMENT_QUALITY=0.65`) rejects low-quality photos on register + update.

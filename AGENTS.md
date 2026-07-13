@@ -26,6 +26,22 @@ step that could use an external tool, run `scripts/bin/harness-cli query tools
 capability is a clean skip.
 <!-- HARNESS:END -->
 
+## Database Safety
+
+**NEVER** run these commands — they destroy PostgreSQL data permanently:
+- `docker-compose down -v`
+- `docker volume rm` (any volume name)
+- Any `-v` / `--volumes` flag with `docker-compose down` or `docker stack rm`
+
+DB uses a named Docker volume `libcounterai_postgres_data`. Data survives
+container/service/OS restart. A volume delete (the commands above) is the only
+way data is lost — prohibit it.
+
+## Git Discipline
+
+**Chỉ được commit/push/pull khi tôi yêu cầu.** Không tự ý thực hiện bất kỳ
+thao tác git nào. Nếu tôi kêu commit thì mới commit, kêu push thì mới push.
+
 ## Commit Convention
 
 **1 feature = 1 commit.** Sau mỗi feature hoàn chỉnh, tôi sẽ đề xuất commit

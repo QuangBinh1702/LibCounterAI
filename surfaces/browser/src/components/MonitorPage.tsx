@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  VideoCamera, Camera, UploadSimple, Play, Stop, Trash, GearSix,
-  ArrowLineDownLeft, ArrowLineUpRight, FileText, Plus, Plugs, Users,
+  VideoCamera, Camera, UploadSimple, Play, Stop, Trash,
+  ArrowLineDownLeft, ArrowLineUpRight, FileText, Plus,
   SlidersHorizontal, X, Pencil,
 } from '@phosphor-icons/react';
 import { useAuth } from '../hooks/useAuth';
@@ -51,12 +51,12 @@ type CameraSourceTab = 'webcam' | 'upload' | 'rtsp';
 type LogFilter = 'all' | 'entry' | 'exit' | 'system';
 
 export function MonitorPage() {
-  const { apiUrl } = useAuth();
+  const { apiFetch, apiUrl } = useAuth();
   const { show: showToast } = useToast();
 
   const [cameraSourceTab, setCameraSourceTab] = useState<CameraSourceTab>('webcam');
-  const [backendUrl, setBackendUrl] = useState(apiUrl);
-  const [isBackendOnline, setIsBackendOnline] = useState(false);
+  const [backendUrl] = useState(apiUrl);
+  const [, setIsBackendOnline] = useState(false);
   const [sourceType, setSourceType] = useState<'webcam' | 'video' | 'none'>('none');
   const [isRunning, setIsRunning] = useState(false);
   const [fps, setFps] = useState(0);
@@ -140,7 +140,7 @@ useEffect(() => {
 }, []);
   const loadCameras = async () => {
     try {
-      const res = await fetch(`${apiUrlFn('/api/cameras')}`);
+      const res = await apiFetch('/api/cameras');
       if (res.ok) {
         const data = await res.json();
         setCamerasList(data.items || data || []);
@@ -154,9 +154,8 @@ useEffect(() => {
       return;
     }
     try {
-      const res = await fetch(`${apiUrlFn('/api/cameras')}`, {
+      const res = await apiFetch('/api/cameras', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newCamName, source_type: 'RTSP', source_url: newCamUrl }),
       });
       if (res.ok) {
@@ -176,7 +175,7 @@ useEffect(() => {
   const handleRemoveCamera = async (id: number, name: string) => {
     if (!confirm(`Xoá camera "${name}"?`)) return;
     try {
-      const res = await fetch(`${apiUrlFn(`/api/cameras/${id}`)}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/cameras/${id}`, { method: 'DELETE' });
       if (res.ok) {
         showToast(`Đã xoá camera "${name}".`, 'success');
         loadCameras();
@@ -207,9 +206,8 @@ useEffect(() => {
       return;
     }
     try {
-      const res = await fetch(`${apiUrlFn(`/api/cameras/${editingCamId}`)}`, {
+      const res = await apiFetch(`/api/cameras/${editingCamId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: editCamName.trim(), source_type: 'RTSP', source_url: editCamUrl.trim() }),
       });
       if (res.ok) {
@@ -227,7 +225,7 @@ useEffect(() => {
 
   const testCamera = async (id: number) => {
     try {
-      const res = await fetch(`${apiUrlFn(`/api/cameras/${id}/test`)}`, { method: 'POST' });
+      const res = await apiFetch(`/api/cameras/${id}/test`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         showToast(`Kiểm tra kết nối: ${data.status}`, 'success');
@@ -397,7 +395,7 @@ useEffect(() => {
 
     try {
       const requestStart = performance.now();
-      const response = await fetch(`${apiUrlFn('/api/process-frame')}`, {
+      const response = await apiFetch('/api/process-frame', {
         method: 'POST',
         body: formData,
       });

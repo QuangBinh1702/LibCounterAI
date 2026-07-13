@@ -22,4 +22,4 @@ const child = spawn(process.execPath, [viteBin, "--host", host, "--port", port],
   env: process.env,
 });
 
-forwardSignals(child);
+// forwardSignals(child); // Bỏ để tránh chết chain

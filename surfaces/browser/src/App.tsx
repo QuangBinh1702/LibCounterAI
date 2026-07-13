@@ -4,7 +4,6 @@ import { AnimatePresence } from 'framer-motion';
 import { useAuth } from './hooks/useAuth';
 import { useToast } from './hooks/useToast';
 import { useTheme } from './hooks/useTheme';
-import { ToastContainer } from './components/Toast';
 import { NavTabs } from './components/NavTabs';
 import { PageTransition } from './components/PageTransition';
 import { LoginPage } from './components/LoginPage';
@@ -23,7 +22,7 @@ type TabId = OpsTabId | 'admin';
 
 function App() {
   const { isAuthenticated, isAdmin, logout } = useAuth();
-  const { toasts, dismiss: dismissToast } = useToast();
+  const { show: showToast } = useToast();
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<TabId>('monitor');
   const [prevOpsTab, setPrevOpsTab] = useState<OpsTabId>('monitor');
@@ -41,6 +40,11 @@ function App() {
     localStorage.setItem('libcounterai-reduce-motion', String(reduceMotion));
   }, [reduceMotion]);
 
+  useEffect(() => {
+    const handler = () => showToast('Bạn không có quyền thực hiện thao tác này.', 'error');
+    window.addEventListener('auth:forbidden', handler);
+    return () => window.removeEventListener('auth:forbidden', handler);
+  }, [showToast]);
   const navTabs: { id: OpsTabId; label: string; Icon: React.ComponentType<{ size?: number; weight?: 'regular' }> }[] = [
     { id: 'monitor', label: 'Giám sát', Icon: VideoCamera },
     { id: 'registry', label: 'Thành viên', Icon: Users },
@@ -63,17 +67,11 @@ function App() {
   };
 
   if (!isAuthenticated) {
-    return (
-      <>
-        <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-        <LoginPage />
-      </>
-    );
+    return <LoginPage />;
   }
 
   return (
     <>
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       <header className="app-header">
         <div className="brand">
           <div className="brand-icon">L</div>

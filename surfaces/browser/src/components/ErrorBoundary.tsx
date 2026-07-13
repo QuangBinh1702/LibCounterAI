@@ -1,4 +1,4 @@
-import React, { Component, type ErrorInfo, type ReactNode } from 'react';
+import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { WarningCircle, ArrowClockwise, House } from '@phosphor-icons/react';
 
 const ICON = { size: 20, weight: 'fill' as const };

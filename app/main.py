@@ -12,6 +12,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Generic, TypeVar
 
+from auth import (
+    hash_password, verify_password, create_access_token,
+    get_current_user, require_user, require_staff, require_admin,
+)
+
 T = TypeVar("T")
 
 class PaginatedResponse(BaseModel, Generic[T]):
@@ -52,24 +57,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize detector globally
-detector = None
 face_pipeline = None
 session_trackers = {}
 face_template_cache = {"loaded_at": 0.0, "items": []}
 FACE_TEMPLATE_CACHE_TTL_SECONDS = 10.0
+recognition_config_cache = {"loaded_at": 0.0, "config": None}
+RECOGNITION_CONFIG_CACHE_TTL_SECONDS = 10.0
 
 # Retention & privacy config
-UNKNOWN_IDENTITY_EXPIRE_HOURS = int(os.getenv("UNKNOWN_IDENTITY_EXPIRE_HOURS", "24"))
-UNKNOWN_EXPIRED_GRACE_HOURS = int(os.getenv("UNKNOWN_EXPIRED_GRACE_HOURS", "72"))
 RETENTION_CLEANUP_INTERVAL_SECONDS = int(os.getenv("RETENTION_CLEANUP_INTERVAL_SECONDS", "3600"))
 AUDIT_LOG_ENABLED = os.getenv("AUDIT_LOG_ENABLED", "true").lower() == "true"
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
-RETENTION_EVENT_DAYS = int(os.getenv("RETENTION_EVENT_DAYS", "365"))
-RETENTION_SESSION_DAYS = int(os.getenv("RETENTION_SESSION_DAYS", "365"))
-RETENTION_UNKNOWN_PURGE_DAYS = int(os.getenv("RETENTION_UNKNOWN_PURGE_DAYS", "30"))
-RETENTION_TEMPLATE_GRACE_DAYS = int(os.getenv("RETENTION_TEMPLATE_GRACE_DAYS", "90"))
-RETENTION_AUDIT_LOG_DAYS = int(os.getenv("RETENTION_AUDIT_LOG_DAYS", "730"))
+MIN_ENROLLMENT_QUALITY = float(os.getenv("MIN_ENROLLMENT_QUALITY", "0.65"))
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
 ALLOWED_PERSON_ROLES = {"STUDENT", "FACULTY", "STAFF", "GUEST"}
@@ -288,6 +287,31 @@ def load_active_face_templates(db: Session, *, force_refresh: bool = False):
     return parsed_templates
 
 
+def load_recognition_config(db: Session):
+    now = time.monotonic()
+    cache_age = now - float(recognition_config_cache["loaded_at"])
+    if (
+        float(recognition_config_cache["loaded_at"]) > 0
+        and cache_age < RECOGNITION_CONFIG_CACHE_TTL_SECONDS
+        and recognition_config_cache["config"] is not None
+    ):
+        return recognition_config_cache["config"]
+
+    config_row = db.query(models.CameraConfig).first()
+    if config_row is not None:
+        cfg = {
+            "recognition_threshold": config_row.recognition_threshold,
+            "unknown_threshold": config_row.unknown_threshold,
+        }
+    else:
+        cfg = {
+            "recognition_threshold": 0.6,
+            "unknown_threshold": 0.55,
+        }
+    recognition_config_cache["loaded_at"] = now
+    recognition_config_cache["config"] = cfg
+    return cfg
+
 def identity_from_visit_session(session: models.VisitSession):
     if session.identity_type == "KNOWN" and session.person_id is not None:
         return {
@@ -332,68 +356,6 @@ def infer_exit_identity_from_active_sessions(db: Session):
 _retention_running = False
 
 
-def _close_expired_sessions(db: Session, now: datetime.datetime) -> int:
-    expired = (
-        db.query(models.VisitSession)
-        .filter(
-            models.VisitSession.status == "ACTIVE",
-            models.VisitSession.entry_at < now - datetime.timedelta(hours=UNKNOWN_IDENTITY_EXPIRE_HOURS + 24),
-        )
-        .all()
-    )
-    count = 0
-    for sess in expired:
-        sess.status = "TIMEOUT"
-        sess.exit_at = sess.entry_at
-        sess.duration_seconds = 0
-        count += 1
-    if count:
-        db.commit()
-        log_info(f"Retention: closed {count} stale session(s)")
-    return count
-
-
-def _expire_unknown_identities(db: Session, now: datetime.datetime) -> int:
-    expired = (
-        db.query(models.UnknownIdentity)
-        .filter(
-            models.UnknownIdentity.status == "ACTIVE",
-            models.UnknownIdentity.expire_at <= now,
-        )
-        .all()
-    )
-    count = 0
-    for unk in expired:
-        unk.status = "EXPIRED"
-        count += 1
-    if count:
-        db.commit()
-        log_info(f"Retention: expired {count} unknown identit(ies)")
-        for unk in expired:
-            audit_log(None, "expire", "unknown_identity", unk.id, details={"anonymous_code": unk.anonymous_code})
-    return count
-
-
-def _purge_expired_embeddings(db: Session, now: datetime.datetime) -> int:
-    cutoff = now - datetime.timedelta(hours=UNKNOWN_EXPIRED_GRACE_HOURS)
-    expired = (
-        db.query(models.UnknownIdentity)
-        .filter(
-            models.UnknownIdentity.status == "EXPIRED",
-            models.UnknownIdentity.expire_at < cutoff,
-        )
-        .all()
-    )
-    count = 0
-    for unk in expired:
-        unk.embedding_vector = None
-        count += 1
-    if count:
-        db.commit()
-        log_info(f"Retention: purged embeddings of {count} expired unknown identit(ies)")
-    return count
-
-
 def _retention_cleanup():
     from retention import run_retention as _run_retention
     from database import SessionLocal
@@ -426,6 +388,15 @@ def stop_retention_cleanup():
 @app.on_event("startup")
 def load_models():
     global detector, face_pipeline
+    # Run pending database migrations
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic import command
+        alembic_cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
+        command.upgrade(alembic_cfg, "head")
+        print("Database migrations up to date.")
+    except Exception as e:
+        print(f"Migrations skipped (non-fatal): {e}")
     # Initialize YOLOv8 Detector
     detector = YOLOv8Detector()
     print("YOLOv8 ONNX Detector loaded successfully.")
@@ -454,6 +425,16 @@ def _seed_admin_user():
             ))
             db.commit()
             print("Created default admin user (admin/admin).")
+        librarian = db.query(models.User).filter_by(username="librarian").first()
+        if librarian is None:
+            db.add(models.User(
+                username="librarian",
+                password_hash=hash_password("librarian"),
+                role="LIBRARIAN",
+                status="ACTIVE",
+            ))
+            db.commit()
+            print("Created default librarian user (librarian/librarian).")
     except Exception as e:
         print(f"Seed admin user skipped: {e}")
     finally:
@@ -516,6 +497,7 @@ async def process_frame(
     identity_probe: str = Form("false"),
     detect_frame: str = Form("true"),
     identity_ttl_seconds: str = Form("5"),
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db)
 ):
     request_start = time.perf_counter()
@@ -592,6 +574,9 @@ async def process_frame(
 
         if tracks_to_identify:
             parsed_templates = load_active_face_templates(db)
+            recog_cfg = load_recognition_config(db)
+            recog_threshold = recog_cfg["recognition_threshold"]
+            unk_threshold = recog_cfg["unknown_threshold"]
 
             for track in tracks_to_identify:
                 track_id = track["track_id"]
@@ -629,7 +614,7 @@ async def process_frame(
                             best_sim = sim
                             best_match = pt
 
-                    if best_sim >= 0.6 and best_match is not None:
+                    if best_sim >= recog_threshold and best_match is not None:
                         identity = {
                             "person_id": best_match["person_id"],
                             "person_name": best_match["person_name"],
@@ -660,7 +645,7 @@ async def process_frame(
                             best_unk_sim = sim
                             best_unk_match = unk
 
-                    if best_unk_sim >= 0.55 and best_unk_match is not None:
+                    if best_unk_sim >= unk_threshold and best_unk_match is not None:
                         best_unk_match.last_seen_at = now
                         best_unk_match.visit_count += 1
                         db.commit()
@@ -896,6 +881,7 @@ async def register_person(
     role: str = Form(...),
     status_str: str = Form("ACTIVE", alias="status"),
     file: UploadFile = File(...),
+    _admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     # 1. Validate role
@@ -946,6 +932,14 @@ async def register_person(
             detail="Multiple faces detected in the uploaded photo. Please upload a portrait with exactly one face."
         )
         
+    # Quality check
+    quality = float(faces[0]["score"])
+    if quality < MIN_ENROLLMENT_QUALITY:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Ảnh chụp không đủ chất lượng ({quality:.2f}). Yêu cầu tối thiểu: {MIN_ENROLLMENT_QUALITY:.2f}. Vui lòng tải ảnh rõ nét hơn."
+        )
+        
     # 4. Extract face embedding
     try:
         embedding = face_pipeline.extract_embedding(img, faces[0]["raw_face"])
@@ -971,7 +965,7 @@ async def register_person(
             embedding_vector=embedding,
             model_name="sface",
             model_version="2021dec",
-            quality_score=float(faces[0]["score"]),
+            quality_score=quality,
             source_type="UPLOAD",
             is_active=True
         )
@@ -995,11 +989,12 @@ async def register_person(
     except Exception as e:
         db.rollback()
         log_info(f"Database transaction failed (queued offline): {e}")
-        _queue_person(full_name, member_code, role, status_str, embedding, float(faces[0]["score"]))
+        _queue_person(full_name, member_code, role, status_str, embedding, quality)
         return {"message": "Person queued for registration (database unavailable)", "queued": True}
 
 @app.get("/api/persons")
 async def get_persons(
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db),
     skip: int = 0,
     limit: int = 100,
@@ -1021,7 +1016,11 @@ async def get_persons(
     )
 
 @app.get("/api/persons/{person_id}")
-async def get_person(person_id: int, db: Session = Depends(get_db)):
+async def get_person(
+    person_id: int,
+    _user: models.User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
     person = db.query(models.Person).filter_by(id=person_id).first()
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
@@ -1061,7 +1060,11 @@ async def get_person(person_id: int, db: Session = Depends(get_db)):
     }
 
 @app.delete("/api/persons/{person_id}")
-async def delete_person(person_id: int, db: Session = Depends(get_db)):
+async def delete_person(
+    person_id: int,
+    _admin: models.User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     person = db.query(models.Person).filter_by(id=person_id).first()
     if not person:
         raise HTTPException(status_code=404, detail="Person not found")
@@ -1089,6 +1092,7 @@ async def update_person(
     role: str = Form(...),
     status_str: str = Form("ACTIVE", alias="status"),
     file: Optional[UploadFile] = File(None),
+    _admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     person = db.query(models.Person).filter_by(id=person_id).first()
@@ -1150,7 +1154,15 @@ async def update_person(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Multiple faces detected in the uploaded photo. Please upload a portrait with exactly one face."
             )
-            
+        
+        # Quality check
+        quality = float(faces[0]["score"])
+        if quality < MIN_ENROLLMENT_QUALITY:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Ảnh chụp không đủ chất lượng ({quality:.2f}). Yêu cầu tối thiểu: {MIN_ENROLLMENT_QUALITY:.2f}. Vui lòng tải ảnh rõ nét hơn."
+            )
+        
         try:
             embedding = face_pipeline.extract_embedding(img, faces[0]["raw_face"])
         except Exception as e:
@@ -1168,7 +1180,7 @@ async def update_person(
                 embedding_vector=embedding,
                 model_name="sface",
                 model_version="2021dec",
-                quality_score=float(faces[0]["score"]),
+                quality_score=quality,
                 source_type="UPLOAD",
                 is_active=True
             )
@@ -1194,6 +1206,7 @@ async def update_person(
 
 @app.get("/api/events")
 async def get_events(
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db),
     skip: int = 0,
     limit: int = 100,
@@ -1254,6 +1267,7 @@ def resolve_report_window(
 
 @app.get("/api/sessions")
 async def get_sessions(
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db),
     date: str = None,
     from_date: str = None,
@@ -1298,6 +1312,7 @@ async def get_sessions(
 
 @app.get("/api/stats/occupancy")
 async def get_occupancy(
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db),
     date: str = None,
     from_date: str = None,
@@ -1369,6 +1384,7 @@ async def get_occupancy(
 
 @app.get("/api/stats/hourly")
 async def get_hourly_stats(
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db),
     date: str = None,
     from_date: str = None,
@@ -1393,11 +1409,6 @@ async def get_hourly_stats(
 
 # ── Auth endpoints ────────────────────────────────────────────────
 
-
-from auth import (
-    hash_password, verify_password, create_access_token,
-    get_current_user, require_user, require_admin,
-)
 
 
 @app.post("/api/auth/login")
@@ -1472,6 +1483,48 @@ async def list_users(
     )
 
 
+@app.put("/api/auth/password")
+async def change_password(
+    body: dict,
+    user: models.User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    current_password = body.get("current_password", "")
+    new_password = body.get("new_password", "")
+    if not new_password or len(new_password) < 6:
+        raise HTTPException(status_code=422, detail="New password must be at least 6 characters")
+    if not verify_password(current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    return {"message": "Password updated"}
+
+
+@app.put("/api/auth/users/{user_id}")
+async def update_user(
+    user_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+):
+    target = db.query(models.User).filter_by(id=user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if "status" in body:
+        if body["status"] == "INACTIVE":
+            admin_count = db.query(models.User).filter_by(role="ADMIN", status="ACTIVE").count()
+            if target.role == "ADMIN" and admin_count <= 1:
+                raise HTTPException(status_code=400, detail="Cannot deactivate the last ADMIN")
+        target.status = body["status"]
+    if "role" in body:
+        if body["role"] not in ALLOWED_USER_ROLES:
+            allowed = ", ".join(sorted(ALLOWED_USER_ROLES))
+            raise HTTPException(status_code=400, detail=f"Invalid role '{body['role']}'. Allowed: {allowed}.")
+        target.role = body["role"]
+    db.commit()
+    return {"id": target.id, "username": target.username, "role": target.role, "status": target.status}
+
+
 # ── Retention & audit endpoints ────────────────────────────────────
 
 
@@ -1507,39 +1560,36 @@ async def get_expired_unknowns(
 @app.post("/api/admin/retention/run")
 async def trigger_retention_run(
     db: Session = Depends(get_db),
-    _admin: models.User = Depends(require_admin),
+    _staff: models.User = Depends(require_staff),
+    dry_run: bool = False,
 ):
     from retention import run_retention as _run_retention
     now = utc_now()
-    results = _run_retention(db, now=now)
+    results = _run_retention(db, now=now, dry_run=dry_run)
     return {
         "phases": results,
         "duration_ms": sum(r["duration_ms"] for r in results),
+        "dry_run": dry_run,
         "timestamp": now.isoformat(),
     }
 
 
 @app.get("/api/admin/retention/config")
 async def get_retention_config(
-    _admin: models.User = Depends(require_admin),
+    _staff: models.User = Depends(require_staff),
 ):
+    from retention import read_config
     return {
-        "unknown_identity_expire_hours": UNKNOWN_IDENTITY_EXPIRE_HOURS,
-        "unknown_expired_grace_hours": UNKNOWN_EXPIRED_GRACE_HOURS,
+        "retention": read_config(),
         "retention_cleanup_interval_seconds": RETENTION_CLEANUP_INTERVAL_SECONDS,
         "audit_log_enabled": AUDIT_LOG_ENABLED,
-        "event_days": RETENTION_EVENT_DAYS,
-        "session_days": RETENTION_SESSION_DAYS,
-        "unknown_purge_days": RETENTION_UNKNOWN_PURGE_DAYS,
-        "template_grace_days": RETENTION_TEMPLATE_GRACE_DAYS,
-        "audit_log_days": RETENTION_AUDIT_LOG_DAYS,
     }
 
 
 @app.get("/api/admin/retention/status")
 async def get_retention_status(
+    _staff: models.User = Depends(require_staff),
     db: Session = Depends(get_db),
-    _admin: models.User = Depends(require_admin),
 ):
     from retention import count_pending, read_config
     cfg = read_config()
@@ -1552,12 +1602,12 @@ async def get_retention_status(
 
 @app.get("/api/admin/audit-log")
 async def get_audit_log(
+    _staff: models.User = Depends(require_staff),
     db: Session = Depends(get_db),
     action: str | None = None,
     entity_type: str | None = None,
     skip: int = 0,
     limit: int = 100,
-    _admin: models.User = Depends(require_admin),
 ):
     query = db.query(models.AuditLog)
     if action:
@@ -1587,6 +1637,7 @@ async def get_audit_log(
 @app.get("/api/persons/{person_id}/templates")
 async def get_person_templates(
     person_id: int,
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db),
     skip: int = 0,
     limit: int = 100,
@@ -1641,19 +1692,6 @@ async def delete_person_template(
         ip_address=request.client.host if request.client else None,
     )
     return {"message": "Face template deleted", "template_id": template_id}
-
-
-@app.get("/api/admin/retention/config")
-async def get_retention_config(
-    _admin: models.User = Depends(require_admin),
-):
-    return {
-        "unknown_identity_expire_hours": UNKNOWN_IDENTITY_EXPIRE_HOURS,
-        "unknown_expired_grace_hours": UNKNOWN_EXPIRED_GRACE_HOURS,
-        "retention_cleanup_interval_seconds": RETENTION_CLEANUP_INTERVAL_SECONDS,
-        "audit_log_enabled": AUDIT_LOG_ENABLED,
-    }
-
 class CameraCreate(BaseModel):
     name: str
     source_type: str # 'WEBCAM', 'FILE', 'RTSP'
@@ -1661,6 +1699,7 @@ class CameraCreate(BaseModel):
 
 @app.get("/api/cameras")
 async def get_cameras(
+    _user: models.User = Depends(require_user),
     db: Session = Depends(get_db),
     skip: int = 0,
     limit: int = 100,
@@ -1683,7 +1722,11 @@ async def get_cameras(
     )
 
 @app.post("/api/cameras")
-async def create_camera(data: CameraCreate, db: Session = Depends(get_db)):
+async def create_camera(
+    data: CameraCreate,
+    _admin: models.User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     # Validate connection based on type
     status_str = "ONLINE"
     if data.source_type == "FILE":
@@ -1737,7 +1780,12 @@ async def create_camera(data: CameraCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/cameras/{camera_id}")
-async def update_camera(camera_id: int, data: CameraCreate, db: Session = Depends(get_db)):
+async def update_camera(
+    camera_id: int,
+    data: CameraCreate,
+    _admin: models.User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     camera = db.query(models.Camera).filter_by(id=camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -1757,7 +1805,11 @@ async def update_camera(camera_id: int, data: CameraCreate, db: Session = Depend
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/cameras/{camera_id}/test")
-async def test_camera_connection(camera_id: int, db: Session = Depends(get_db)):
+async def test_camera_connection(
+    camera_id: int,
+    _admin: models.User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     camera = db.query(models.Camera).filter_by(id=camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -1794,7 +1846,11 @@ async def test_camera_connection(camera_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/cameras/{camera_id}")
-async def delete_camera(camera_id: int, db: Session = Depends(get_db)):
+async def delete_camera(
+    camera_id: int,
+    _admin: models.User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     camera = db.query(models.Camera).filter_by(id=camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -1812,12 +1868,16 @@ async def root():
 
 
 @app.get("/api/sync/status")
-async def sync_status():
+async def sync_status(
+    _user: models.User = Depends(require_user),
+):
     return sync_service.get_status()
 
 
 @app.post("/api/sync/trigger")
-async def sync_trigger():
+async def sync_trigger(
+    _admin: models.User = Depends(require_admin),
+):
     from offline_queue import get_pending, remove, mark_error, is_postgres_alive
     from database import SessionLocal
     import models
@@ -1844,7 +1904,9 @@ async def sync_trigger():
 
 
 @app.get("/api/sync/pending")
-async def sync_pending():
+async def sync_pending(
+    _user: models.User = Depends(require_user),
+):
     from offline_queue import get_pending
     return {"pending": get_pending()}
 

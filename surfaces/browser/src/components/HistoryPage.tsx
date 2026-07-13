@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { CalendarBlank } from '@phosphor-icons/react';
 import { useAuth } from '../hooks/useAuth';
 import { useToast } from '../hooks/useToast';

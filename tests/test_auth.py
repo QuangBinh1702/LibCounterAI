@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from auth import (
     hash_password, verify_password,
     create_access_token, decode_access_token,
-    get_current_user, require_user, require_admin,
+    get_current_user, require_user, require_admin, require_staff,
 )
 from models import User
 
@@ -98,6 +98,28 @@ def test_require_admin_passes():
     mock_user = MagicMock(spec=User)
     mock_user.role = "ADMIN"
     assert require_admin(mock_user) == mock_user
+
+
+def test_require_staff_raises_when_unknown_role():
+    import pytest
+    from fastapi import HTTPException
+    mock_user = MagicMock(spec=User)
+    mock_user.role = "GUEST"
+    with pytest.raises(HTTPException) as exc:
+        require_staff(mock_user)
+    assert exc.value.status_code == 403
+
+
+def test_require_staff_passes_for_admin():
+    mock_user = MagicMock(spec=User)
+    mock_user.role = "ADMIN"
+    assert require_staff(mock_user) == mock_user
+
+
+def test_require_staff_passes_for_librarian():
+    mock_user = MagicMock(spec=User)
+    mock_user.role = "LIBRARIAN"
+    assert require_staff(mock_user) == mock_user
 
 
 def test_token_with_custom_expiry():
