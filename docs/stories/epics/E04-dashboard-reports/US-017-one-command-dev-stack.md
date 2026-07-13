@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress.
+implemented
 
 ## Story
 
@@ -40,9 +40,8 @@ data loaded.
   checks backend health, checks seeded sessions through the API, checks the
   browser dashboard HTTP response, then stops background app processes.
 
-Current proof is blocked in this environment because Docker Desktop did not
-make the Docker engine ready within 150 seconds after the launcher attempted to
-start it.
+2026-07-13: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\validate_dev_stack.ps1 -NoInstall` passed:
+backend healthy, frontend HTTP 200, 4 seeded sessions returned via API.
 
 ## Delta
 
@@ -54,3 +53,5 @@ start it.
 - Added `scripts/validate_dev_stack.ps1` so Harness can prove prepare + concurrent
   startup without leaving FastAPI and Vite running.
 - Updated the demo runbook with the new preferred workflow.
+- 2026-07-13: Fixed `Test-DockerReady` in `dev.ps1` to use `docker ps` instead of `docker info` (PowerShell `*>` redirection caused `docker info` to receive `*` as an argument).
+- 2026-07-13: Fixed `validate_dev_stack.ps1` — sessions API date changes from hardcoded `2026-07-07` to today's date; frontend URL changed from `127.0.0.1` to `localhost` (Vite binds to IPv6 only; `localhost` resolves to `[::1]` on Windows).

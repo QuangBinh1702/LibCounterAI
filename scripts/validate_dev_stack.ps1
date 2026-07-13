@@ -11,8 +11,8 @@ $DevScript = Join-Path $PSScriptRoot "dev.ps1"
 
 $backendPort = Get-DotEnvValue "BACKEND_PORT" "8000"
 $frontendPort = Get-DotEnvValue "FRONTEND_PORT" "5173"
-$backendUrl = "http://127.0.0.1:$backendPort"
-$frontendUrl = "http://127.0.0.1:$frontendPort"
+$backendUrl = "http://localhost:$backendPort"
+$frontendUrl = "http://localhost:$frontendPort"
 
 Push-Location $Root
 $devProcess = $null
@@ -43,9 +43,11 @@ try {
         throw "Backend health check returned '$($health.status)'."
     }
 
-    $sessions = Invoke-RestMethod -Uri "$backendUrl/api/sessions?date=2026-07-07" -TimeoutSec 10
-    if (-not $sessions -or $sessions.Count -lt 1) {
-        throw "Demo sessions endpoint did not return seeded rows."
+    $today = (Get-Date).ToString('yyyy-MM-dd')
+    $sessions = Invoke-RestMethod -Uri "$backendUrl/api/sessions?date=$today" -TimeoutSec 10
+    $items = if ($sessions.items) { $sessions.items } else { $sessions }
+    if (-not $items -or $items.Count -lt 1) {
+        throw "Demo sessions endpoint did not return seeded rows for $today."
     }
 
     $frontend = Invoke-WebRequest -Uri $frontendUrl -UseBasicParsing -TimeoutSec 10
@@ -56,7 +58,7 @@ try {
     Write-Host "Dev stack validation passed."
     Write-Host "Backend:  $backendUrl"
     Write-Host "Frontend: $frontendUrl"
-    Write-Host "Sessions: $($sessions.Count)"
+    Write-Host "Sessions: $($items.Count)"
 } finally {
     if ($devProcess -and -not $devProcess.HasExited) {
         Stop-Process -Id $devProcess.Id -Force -ErrorAction SilentlyContinue

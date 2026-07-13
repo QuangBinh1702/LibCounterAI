@@ -15,7 +15,7 @@ $Python = Join-Path $Root ".venv\Scripts\python.exe"
 
 function Test-DockerReady {
     try {
-        & docker info *> $null
+        $null = & docker ps 2>&1
         return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
